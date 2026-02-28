@@ -1,43 +1,70 @@
 package com.example.document_parser.entity;
 
+import com.example.document_parser.model.JobStatus;
 import jakarta.persistence.*;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
+
 import java.time.LocalDateTime;
 
 @Entity
 @Table(name = "parsed_documents")
+@Getter
+@Setter
+@NoArgsConstructor
 public class DocumentEntity {
 
     @Id
     private String jobId;
 
-    private String status;
+    // ИСПРАВЛЕНО: enum вместо строки — опечатка теперь не компилируется
+    @Enumerated(EnumType.STRING)
+    private JobStatus status;
 
-    // Указываем тип TEXT, так как JSON может быть большим
+    private String originalFileName;
+
+    @Column
+    private String taskType; // "PARSE" or "GENERATE"
+
+    @Column
+    private String webhookUrl;
+
     @Column(columnDefinition = "TEXT")
     private String resultJson;
 
+    // НОВОЕ: прогресс парсинга 0–100 для отображения прогресс-бара на фронте
+    @Column(nullable = false)
+    private int progress = 0;
+
     private LocalDateTime createdAt;
+    private LocalDateTime updatedAt;
 
-    // Обязательный пустой конструктор для Spring
-    public DocumentEntity() {}
-
-    public DocumentEntity(String jobId, String status, String resultJson) {
+    public DocumentEntity(String jobId, JobStatus status, String originalFileName) {
         this.jobId = jobId;
         this.status = status;
-        this.resultJson = resultJson;
+        this.originalFileName = originalFileName;
+        this.taskType = "PARSE";
+        this.progress = status == JobStatus.SUCCESS ? 100 : 0;
         this.createdAt = LocalDateTime.now();
+        this.updatedAt = LocalDateTime.now();
     }
 
-    // Геттеры и Сеттеры
-    public String getJobId() { return jobId; }
-    public void setJobId(String jobId) { this.jobId = jobId; }
+    public DocumentEntity(String jobId, JobStatus status, String originalFileName, String taskType, String webhookUrl) {
+        this(jobId, status, originalFileName);
+        this.taskType = taskType;
+        this.webhookUrl = webhookUrl;
+    }
 
-    public String getStatus() { return status; }
-    public void setStatus(String status) { this.status = status; }
+    public DocumentEntity(String jobId, JobStatus status, String originalFileName, String resultJson) {
+        this(jobId, status, originalFileName);
+        this.resultJson = resultJson;
+        this.progress = status == JobStatus.SUCCESS ? 100 : 0;
+    }
 
-    public String getResultJson() { return resultJson; }
-    public void setResultJson(String resultJson) { this.resultJson = resultJson; }
-
-    public LocalDateTime getCreatedAt() { return createdAt; }
-    public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
+    public void updateProgress(int progress, JobStatus status) {
+        this.progress = progress;
+        this.status = status;
+        this.updatedAt = LocalDateTime.now();
+    }
 }

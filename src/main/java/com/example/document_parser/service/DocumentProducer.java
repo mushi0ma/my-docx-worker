@@ -20,8 +20,13 @@ public class DocumentProducer {
     }
 
     public void sendToQueue(String jobId) {
-        // Отправляем ID задачи в очередь
-        rabbitTemplate.convertAndSend(exchange, routingKey, jobId);
-        System.out.println("Sent Job ID to RabbitMQ: " + jobId);
+        sendToQueue(jobId, "PARSE");
+    }
+
+    public void sendToQueue(String jobId, String taskType) {
+        // Отправляем ID задачи и тип в очередь: "jobId|taskType"
+        String message = jobId + "|" + taskType;
+        rabbitTemplate.convertAndSend(exchange, routingKey, message);
+        System.out.println("Sent Job to RabbitMQ: " + message);
     }
 }

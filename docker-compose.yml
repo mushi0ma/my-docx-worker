@@ -1,6 +1,34 @@
-version: '3.8'
-
 services:
+  app:
+    build: .
+    container_name: document_parser_app
+    ports:
+      - "8081:8081"
+    env_file:
+      - .env
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      REDIS_HOST: redis
+      TEMP_DOCS_PATH: /app/temp_docs
+      IMAGE_STORAGE_PATH: /app/images
+    volumes:
+      - temp_docs_volume:/app/temp_docs
+      # НОВОЕ: отдельный volume для картинок (шардированная структура)
+      - images_volume:/app/images
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # НОВОЕ: healthcheck через Actuator
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
   rabbitmq:
     image: rabbitmq:3-management-alpine
     container_name: ai_rabbitmq
@@ -10,6 +38,11 @@ services:
     environment:
       RABBITMQ_DEFAULT_USER: admin
       RABBITMQ_DEFAULT_PASS: admin123
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
   redis:
@@ -17,4 +50,13 @@ services:
     container_name: ai_redis
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
     restart: unless-stopped
+
+volumes:
+  temp_docs_volume:
+  images_volume:
