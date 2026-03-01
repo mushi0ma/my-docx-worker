@@ -64,6 +64,9 @@ public class DocumentMetadataResponse {
         private String imageName;
         private String imageContentType;
         private String imageUrl;
+        private Integer semanticLevel;
+        private String embeddedObjectName;
+        private String downloadUrl;
     }
 
     @Data
@@ -80,6 +83,11 @@ public class DocumentMetadataResponse {
         private Boolean isItalic;
         private Boolean isUnderline;
         private String hyperlink;
+        private String textHighlightColor;
+        private Boolean isStrikeThrough;
+        private Boolean isSubscript;
+        private Boolean isSuperscript;
+        private Boolean isInternalLink;
     }
 
     @Data

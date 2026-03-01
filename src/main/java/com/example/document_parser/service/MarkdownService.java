@@ -7,7 +7,8 @@ import org.springframework.stereotype.Service;
 import java.util.List;
 
 /**
- * ИСПРАВЛЕНО: Класс был пустым заглушкой. Теперь реализован полноценный конвертер.
+ * ИСПРАВЛЕНО: Класс был пустым заглушкой. Теперь реализован полноценный
+ * конвертер.
  *
  * Конвертирует структурированный DocumentMetadataResponse в Markdown.
  * Используется в /api/v1/documents/{jobId}/markdown эндпоинте.
@@ -35,10 +36,12 @@ public class MarkdownService {
         }
 
         // --- Контент ---
-        if (doc.getContentBlocks() == null) return md.toString();
+        if (doc.getContentBlocks() == null)
+            return md.toString();
 
         for (DocumentBlock block : doc.getContentBlocks()) {
-            if (block == null || block.getType() == null) continue;
+            if (block == null || block.getType() == null)
+                continue;
             md.append(blockToMarkdown(block));
             md.append("\n");
         }
@@ -48,14 +51,14 @@ public class MarkdownService {
 
     private String blockToMarkdown(DocumentBlock block) {
         return switch (block.getType()) {
-            case "HEADER"     -> "# " + safeText(block) + "\n";
-            case "FOOTNOTE"   -> "> *Сноска: " + safeText(block) + "*\n";
-            case "CODE_BLOCK" -> safeText(block) + "\n";  // Уже содержит ``` обёртку
-            case "IMAGE"      -> formatImage(block);
-            case "TABLE"      -> formatTable(block);
-            case "LIST_ITEM"  -> formatListItem(block);
-            case "PARAGRAPH"  -> formatParagraph(block);
-            default           -> safeText(block) + "\n";
+            case "HEADER" -> "# " + safeText(block) + "\n";
+            case "FOOTNOTE" -> "> *Сноска: " + safeText(block) + "*\n";
+            case "CODE_BLOCK" -> safeText(block) + "\n"; // Уже содержит ``` обёртку
+            case "IMAGE" -> formatImage(block);
+            case "TABLE" -> formatTable(block);
+            case "LIST_ITEM" -> formatListItem(block);
+            case "PARAGRAPH" -> formatParagraph(block);
+            default -> safeText(block) + "\n";
         };
     }
 
@@ -64,20 +67,16 @@ public class MarkdownService {
             return safeText(block) + "\n";
         }
 
-        // Определяем, является ли параграф заголовком по styleId
-        String style = block.getStyleName();
-        if (style != null) {
-            if (style.equalsIgnoreCase("Heading1") || style.equalsIgnoreCase("heading1")) return "# " + safeText(block) + "\n";
-            if (style.equalsIgnoreCase("Heading2") || style.equalsIgnoreCase("heading2")) return "## " + safeText(block) + "\n";
-            if (style.equalsIgnoreCase("Heading3") || style.equalsIgnoreCase("heading3")) return "### " + safeText(block) + "\n";
-            if (style.equalsIgnoreCase("Heading4") || style.equalsIgnoreCase("heading4")) return "#### " + safeText(block) + "\n";
-            if (style.equalsIgnoreCase("Title"))   return "# " + safeText(block) + "\n";
+        if (block.getSemanticLevel() != null) {
+            int level = Math.max(1, Math.min(block.getSemanticLevel(), 6));
+            return "#".repeat(level) + " " + safeText(block) + "\n";
         }
 
         // Собираем параграф с учётом форматирования каждого рана
         StringBuilder sb = new StringBuilder();
         for (RunData run : block.getRuns()) {
-            if (run.getText() == null || run.getText().isBlank()) continue;
+            if (run.getText() == null || run.getText().isBlank())
+                continue;
 
             String text = escape(run.getText());
 
@@ -106,8 +105,10 @@ public class MarkdownService {
         // Вычисляем отступ по уровню вложенности
         int level = 0;
         try {
-            if (block.getListLevel() != null) level = Integer.parseInt(block.getListLevel());
-        } catch (NumberFormatException ignored) {}
+            if (block.getListLevel() != null)
+                level = Integer.parseInt(block.getListLevel());
+        } catch (NumberFormatException ignored) {
+        }
 
         String indent = "  ".repeat(level);
         return indent + "- " + safeText(block) + "\n";
@@ -121,12 +122,14 @@ public class MarkdownService {
     }
 
     private String formatTable(DocumentBlock block) {
-        if (block.getTableRows() == null || block.getTableRows().isEmpty()) return "";
+        if (block.getTableRows() == null || block.getTableRows().isEmpty())
+            return "";
         StringBuilder sb = new StringBuilder();
 
         boolean isHeader = true;
         for (TableRowData row : block.getTableRows()) {
-            if (row.getCells() == null) continue;
+            if (row.getCells() == null)
+                continue;
 
             sb.append("|");
             for (TableCellData cell : row.getCells()) {
@@ -137,7 +140,8 @@ public class MarkdownService {
             // После первой строки добавляем разделитель
             if (isHeader) {
                 sb.append("|");
-                for (int i = 0; i < row.getCells().size(); i++) sb.append("---|");
+                for (int i = 0; i < row.getCells().size(); i++)
+                    sb.append("---|");
                 sb.append("\n");
                 isHeader = false;
             }
@@ -152,7 +156,8 @@ public class MarkdownService {
 
     /** Экранирует специальные символы Markdown. */
     private String escape(String text) {
-        if (text == null) return "";
+        if (text == null)
+            return "";
         // Экранируем только |, чтобы не ломать таблицы; остальное — на усмотрение
         return text.replace("|", "\\|");
     }

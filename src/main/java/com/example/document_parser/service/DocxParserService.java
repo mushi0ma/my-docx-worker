@@ -14,6 +14,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
+import org.apache.poi.openxml4j.opc.PackagePart;
 
 @Service
 public class DocxParserService {
@@ -68,6 +69,22 @@ public class DocxParserService {
                 if (!footnoteText.isEmpty()) {
                     blocks.add(DocumentBlock.builder().type("FOOTNOTE").text(footnoteText).build());
                 }
+            }
+
+            // 4. Встроенные объекты (OLE/Embedded)
+            try {
+                for (PackagePart part : document.getAllEmbeddedParts()) {
+                    String embedName = part.getPartName().getName();
+                    embedName = embedName.substring(embedName.lastIndexOf('/') + 1);
+                    String fileUrl = saveEmbeddedAndGetUrl(part, embedName, jobId);
+                    blocks.add(DocumentBlock.builder()
+                            .type("EMBEDDED_OBJECT")
+                            .embeddedObjectName(embedName)
+                            .downloadUrl(fileUrl)
+                            .build());
+                }
+            } catch (Exception e) {
+                // Ignore embed extraction errors
             }
 
             DocumentStats stats = extractMetadata(document, manualWordCount, manualCharCount);
@@ -180,6 +197,11 @@ public class DocxParserService {
                                 .isItalic(prev.getIsItalic())
                                 .isUnderline(prev.getIsUnderline())
                                 .hyperlink(prev.getHyperlink())
+                                .textHighlightColor(prev.getTextHighlightColor())
+                                .isStrikeThrough(prev.getIsStrikeThrough())
+                                .isSubscript(prev.getIsSubscript())
+                                .isSuperscript(prev.getIsSuperscript())
+                                .isInternalLink(prev.getIsInternalLink())
                                 .build());
                     }
                 }
@@ -188,10 +210,38 @@ public class DocxParserService {
             text = text.stripTrailing();
 
             String hyperlink = null;
+            Boolean isInternalLink = null;
             if (run instanceof XWPFHyperlinkRun linkRun) {
                 XWPFHyperlink link = document.getHyperlinkByID(linkRun.getHyperlinkId());
-                if (link != null)
+                if (link != null) {
                     hyperlink = link.getURL();
+                } else if (linkRun.getAnchor() != null && !linkRun.getAnchor().isEmpty()) {
+                    hyperlink = linkRun.getAnchor();
+                    isInternalLink = Boolean.TRUE;
+                }
+            }
+
+            String textHighlightColor = null;
+            try {
+                if (run.getTextHighlightColor() != null
+                        && !"none".equalsIgnoreCase(run.getTextHighlightColor().toString())) {
+                    textHighlightColor = run.getTextHighlightColor().toString();
+                }
+            } catch (Exception e) {
+            }
+
+            Boolean isStrikeThrough = run.isStrikeThrough() ? Boolean.TRUE : null;
+            Boolean isSubscript = null;
+            Boolean isSuperscript = null;
+            try {
+                if (run.getVerticalAlignment() != null) {
+                    String vAlign = run.getVerticalAlignment().toString();
+                    if ("subscript".equalsIgnoreCase(vAlign))
+                        isSubscript = Boolean.TRUE;
+                    if ("superscript".equalsIgnoreCase(vAlign))
+                        isSuperscript = Boolean.TRUE;
+                }
+            } catch (Exception e) {
             }
 
             // ИСПРАВЛЕНО: Boolean вместо boolean — false → null → не попадает в JSON
@@ -204,6 +254,11 @@ public class DocxParserService {
                     .isItalic(run.isItalic() ? Boolean.TRUE : null)
                     .isUnderline(run.getUnderline() != UnderlinePatterns.NONE ? Boolean.TRUE : null)
                     .hyperlink(hyperlink)
+                    .textHighlightColor(textHighlightColor)
+                    .isStrikeThrough(isStrikeThrough)
+                    .isSubscript(isSubscript)
+                    .isSuperscript(isSuperscript)
+                    .isInternalLink(isInternalLink)
                     .build();
 
             // Run merging — ИСПРАВЛЕНО: явный builder() вместо toBuilder()
@@ -219,6 +274,11 @@ public class DocxParserService {
                             .isItalic(prev.getIsItalic())
                             .isUnderline(prev.getIsUnderline())
                             .hyperlink(prev.getHyperlink())
+                            .textHighlightColor(prev.getTextHighlightColor())
+                            .isStrikeThrough(prev.getIsStrikeThrough())
+                            .isSubscript(prev.getIsSubscript())
+                            .isSuperscript(prev.getIsSuperscript())
+                            .isInternalLink(prev.getIsInternalLink())
                             .build());
                     continue;
                 }
@@ -236,6 +296,20 @@ public class DocxParserService {
                 .collect(java.util.stream.Collectors.joining())
                 .strip();
 
+        Integer semanticLevel = null;
+        if (paragraph.getStyleID() != null) {
+            String s = paragraph.getStyleID().toLowerCase();
+            if (s.startsWith("heading") || s.startsWith("заголовок")) {
+                try {
+                    semanticLevel = Integer.parseInt(s.replaceAll("[^0-9]", ""));
+                } catch (Exception e) {
+                    semanticLevel = 1;
+                }
+            } else if (s.equals("title") || s.equals("название")) {
+                semanticLevel = 1;
+            }
+        }
+
         if (!runDataList.isEmpty() || paragraph.getNumID() != null) {
             blocks.add(DocumentBlock.builder()
                     .type(type)
@@ -250,6 +324,7 @@ public class DocxParserService {
                     .spacingAfter(paragraph.getSpacingAfter() != -1 ? paragraph.getSpacingAfter() : null)
                     .lineSpacing(paragraph.getSpacingBetween() != -1 ? paragraph.getSpacingBetween() : null)
                     .runs(runDataList)
+                    .semanticLevel(semanticLevel)
                     .build());
         }
 
@@ -296,6 +371,28 @@ public class DocxParserService {
         }
     }
 
+    private String saveEmbeddedAndGetUrl(PackagePart part, String originalName, String jobId) {
+        try {
+            String shard = jobId.replace("-", "").substring(0, 4);
+            Path shardDir = IMAGE_STORAGE
+                    .resolve(shard.substring(0, 2))
+                    .resolve(shard.substring(2, 4))
+                    .resolve(jobId);
+            Files.createDirectories(shardDir);
+
+            String shortId = UUID.randomUUID().toString().substring(0, 8);
+            String safeFileName = shortId + "_" + originalName;
+            Path filePath = shardDir.resolve(safeFileName);
+
+            try (InputStream is = part.getInputStream()) {
+                Files.copy(is, filePath, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+            return API_PREFIX + "/documents/" + jobId + "/images/" + safeFileName;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     private boolean canMerge(RunData a, RunData b) {
         return Objects.equals(a.getIsBold(), b.getIsBold())
                 && Objects.equals(a.getIsItalic(), b.getIsItalic())
@@ -303,6 +400,10 @@ public class DocxParserService {
                 && Objects.equals(a.getFontFamily(), b.getFontFamily())
                 && Objects.equals(a.getFontSize(), b.getFontSize())
                 && Objects.equals(a.getColor(), b.getColor())
+                && Objects.equals(a.getTextHighlightColor(), b.getTextHighlightColor())
+                && Objects.equals(a.getIsStrikeThrough(), b.getIsStrikeThrough())
+                && Objects.equals(a.getIsSubscript(), b.getIsSubscript())
+                && Objects.equals(a.getIsSuperscript(), b.getIsSuperscript())
                 && a.getHyperlink() == null
                 && b.getHyperlink() == null;
     }
@@ -398,12 +499,97 @@ public class DocxParserService {
             }
             rowDataList.add(rowBuilder.build());
         }
+
+        String aiTableRepresentation = generateAiTableRepresentation(rowDataList);
+
         return DocumentBlock.builder()
                 .type("TABLE")
                 .rowsCount(table.getNumberOfRows())
                 .columnsCount(table.getRows().isEmpty() ? 0 : table.getRow(0).getTableCells().size())
+                .text(aiTableRepresentation)
                 .tableRows(rowDataList)
                 .build();
+    }
+
+    private boolean isComplexTable(List<TableRowData> rowDataList) {
+        for (TableRowData row : rowDataList) {
+            if (row.getCells() == null)
+                continue;
+            for (TableCellData cell : row.getCells()) {
+                if ((cell.getColSpan() != null && cell.getColSpan() > 1) ||
+                        (cell.getVMerge() != null && !cell.getVMerge().isEmpty()
+                                && !"false".equalsIgnoreCase(cell.getVMerge()))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private String generateAiTableRepresentation(List<TableRowData> rowDataList) {
+        if (isComplexTable(rowDataList)) {
+            StringBuilder sb = new StringBuilder("Сложная таблица:\n");
+            int rowIndex = 1;
+            for (TableRowData row : rowDataList) {
+                int colIndex = 1;
+                if (row.getCells() != null) {
+                    for (TableCellData cell : row.getCells()) {
+                        String cellName = getExcelColumnName(colIndex) + rowIndex;
+                        sb.append("Ячейка ").append(cellName);
+
+                        if (cell.getColSpan() != null && cell.getColSpan() > 1) {
+                            sb.append(" объединена с ").append(getExcelColumnName(colIndex + cell.getColSpan() - 1))
+                                    .append(rowIndex);
+                        }
+                        if ("restart".equalsIgnoreCase(cell.getVMerge())) {
+                            sb.append(" (начало вертикального объединения)");
+                        } else if ("continue".equalsIgnoreCase(cell.getVMerge())) {
+                            sb.append(" (продолжение вертикального объединения)");
+                        }
+
+                        String cellText = cell.getText() != null ? cell.getText().replace("\n", " ").trim() : "";
+                        sb.append(", содержит текст: \"").append(cellText).append("\"\n");
+
+                        colIndex += cell.getColSpan() != null ? cell.getColSpan() : 1;
+                    }
+                }
+                rowIndex++;
+            }
+            return sb.toString();
+        } else {
+            StringBuilder sb = new StringBuilder();
+            boolean isHeader = true;
+            for (TableRowData row : rowDataList) {
+                if (row.getCells() == null)
+                    continue;
+                sb.append("|");
+                for (TableCellData cell : row.getCells()) {
+                    sb.append(" ")
+                            .append(cell.getText() != null ? cell.getText().replace("\n", " ").replace("|", "\\|") : "")
+                            .append(" |");
+                }
+                sb.append("\n");
+
+                if (isHeader) {
+                    sb.append("|");
+                    for (int i = 0; i < row.getCells().size(); i++)
+                        sb.append("---|");
+                    sb.append("\n");
+                    isHeader = false;
+                }
+            }
+            return sb.toString();
+        }
+    }
+
+    private String getExcelColumnName(int columnNumber) {
+        StringBuilder columnName = new StringBuilder();
+        while (columnNumber > 0) {
+            int modulo = (columnNumber - 1) % 26;
+            columnName.insert(0, (char) (65 + modulo));
+            columnNumber = (columnNumber - modulo) / 26;
+        }
+        return columnName.toString();
     }
 
     /**

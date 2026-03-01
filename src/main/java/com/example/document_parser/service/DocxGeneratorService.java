@@ -57,7 +57,8 @@ public class DocxGeneratorService {
                         continue;
                     }
 
-                    if ("PARAGRAPH".equals(block.getType())) {
+                    if ("PARAGRAPH".equals(block.getType()) || "LIST_ITEM".equals(block.getType())
+                            || "CODE_BLOCK".equals(block.getType())) {
                         createParagraph(document, block, jobId);
                     } else if ("TABLE".equals(block.getType())) {
                         createTable(document, block, jobId);
@@ -255,6 +256,38 @@ public class DocxGeneratorService {
     private void createParagraph(XWPFDocument document, DocumentMetadataResponse.DocumentBlock block, String jobId) {
         XWPFParagraph p = document.createParagraph();
 
+        if ("CODE_BLOCK".equalsIgnoreCase(block.getType())) {
+            org.openxmlformats.schemas.wordprocessingml.x2006.main.CTShd shd = p.getCTP().getPPr() != null
+                    && p.getCTP().getPPr().isSetShd()
+                            ? p.getCTP().getPPr().getShd()
+                            : (p.getCTP().getPPr() != null ? p.getCTP().getPPr().addNewShd()
+                                    : p.getCTP().addNewPPr().addNewShd());
+            shd.setFill("F4F4F4");
+
+            String codeText = block.getText() != null ? block.getText() : "";
+            if (codeText.startsWith("```")) {
+                int firstNewline = codeText.indexOf('\n');
+                if (firstNewline != -1) {
+                    codeText = codeText.substring(firstNewline + 1);
+                }
+                if (codeText.endsWith("```")) {
+                    codeText = codeText.substring(0, codeText.length() - 3);
+                }
+                codeText = codeText.stripTrailing();
+            }
+
+            String[] lines = codeText.split("\n");
+            for (int i = 0; i < lines.length; i++) {
+                XWPFRun r = p.createRun();
+                r.setText(lines[i]);
+                r.setFontFamily("Consolas");
+                if (i < lines.length - 1) {
+                    r.addBreak();
+                }
+            }
+            return;
+        }
+
         if (block.getStyleName() != null) {
             p.setStyle(block.getStyleName());
         }
@@ -277,11 +310,12 @@ public class DocxGeneratorService {
         if (block.getLineSpacing() != null)
             p.setSpacingBetween(block.getLineSpacing());
 
-        if (block.getListLevel() != null) {
+        if ("LIST_ITEM".equalsIgnoreCase(block.getType()) || block.getListLevel() != null) {
             // Apply List Level NumId (Usually 1 for single lists) and ILvl
             p.setNumID(BigInteger.valueOf(1));
             p.getCTP().getPPr().getNumPr().addNewIlvl()
-                    .setVal(BigInteger.valueOf(Long.parseLong(block.getListLevel())));
+                    .setVal(BigInteger
+                            .valueOf(Long.parseLong(block.getListLevel() != null ? block.getListLevel() : "0")));
         }
 
         if (block.getRuns() != null && !block.getRuns().isEmpty()) {
@@ -297,15 +331,16 @@ public class DocxGeneratorService {
 
     private void createRun(XWPFParagraph p, DocumentMetadataResponse.RunData runData, String jobId) {
         XWPFRun r;
-        if (runData.getHyperlink() != null && !runData.getHyperlink().isEmpty()) {
-            // Restore hyperlinks
-            String rId = p.getDocument().getPackagePart().addExternalRelationship(
-                    runData.getHyperlink(), XWPFRelation.HYPERLINK.getRelation()).getId();
-
-            CTHyperlink ctHyperlink = p.getCTP().addNewHyperlink();
-            ctHyperlink.setId(rId);
-            r = new XWPFHyperlinkRun(ctHyperlink, ctHyperlink.addNewR(), p);
-
+        if (Boolean.TRUE.equals(runData.getIsInternalLink()) && runData.getHyperlink() != null) {
+            org.openxmlformats.schemas.wordprocessingml.x2006.main.CTHyperlink cthlink = p.getCTP().addNewHyperlink();
+            cthlink.setAnchor(runData.getHyperlink());
+            org.openxmlformats.schemas.wordprocessingml.x2006.main.CTR ctr = cthlink.addNewR();
+            r = new XWPFHyperlinkRun(cthlink, ctr, p);
+            r.setColor("0000FF");
+            r.setUnderline(UnderlinePatterns.SINGLE);
+        } else if (runData.getHyperlink() != null && !runData.getHyperlink().isEmpty()) {
+            // Нативный метод POI для ссылок (не ломает .rels)
+            r = p.createHyperlinkRun(runData.getHyperlink());
             r.setColor("0000FF");
             r.setUnderline(UnderlinePatterns.SINGLE);
         } else {
@@ -324,9 +359,19 @@ public class DocxGeneratorService {
             r.setBold(true);
         if (Boolean.TRUE.equals(runData.getIsItalic()))
             r.setItalic(true);
-        if (Boolean.TRUE.equals(runData.getIsUnderline()) && r.getUnderline() == UnderlinePatterns.NONE) {
-            r.setUnderline(UnderlinePatterns.SINGLE);
+
+        if (runData.getTextHighlightColor() != null) {
+            try {
+                r.setTextHighlightColor(runData.getTextHighlightColor());
+            } catch (Exception e) {
+            }
         }
+        if (Boolean.TRUE.equals(runData.getIsStrikeThrough()))
+            r.setStrikeThrough(true);
+        if (Boolean.TRUE.equals(runData.getIsSubscript()))
+            r.setSubscript(VerticalAlign.SUBSCRIPT);
+        if (Boolean.TRUE.equals(runData.getIsSuperscript()))
+            r.setSubscript(VerticalAlign.SUPERSCRIPT);
     }
 
     private void injectImage(XWPFParagraph p, String imageName, String contentType, String jobId) {
@@ -369,77 +414,41 @@ public class DocxGeneratorService {
             return;
 
         XWPFTable table = document.createTable();
-        table.removeRow(0);
+        boolean isFirstRow = true;
 
         for (DocumentMetadataResponse.TableRowData rowData : block.getTableRows()) {
-            XWPFTableRow row = table.createRow();
-            if (row.getTableCells().size() > 0 && (rowData.getCells() == null || rowData.getCells().isEmpty())) {
-                for (int i = row.getTableCells().size() - 1; i >= 0; i--)
-                    row.removeCell(i);
-            }
-
-            if (rowData.getHeight() != null) {
-                row.setHeight(rowData.getHeight());
-            }
+            XWPFTableRow row = isFirstRow ? table.getRow(0) : table.createRow();
+            isFirstRow = false;
 
             if (rowData.getCells() != null) {
-                for (DocumentMetadataResponse.TableCellData cellData : rowData.getCells()) {
-                    XWPFTableCell cell = row.addNewTableCell();
-
-                    if (cellData.getWidth() != null) {
-                        cell.setWidth(cellData.getWidth() + "twip");
-                    }
-                    if (cellData.getBackgroundColor() != null) {
-                        cell.setColor(cellData.getBackgroundColor().replace("#", ""));
-                    }
-
-                    if (cellData.getColSpan() != null && cellData.getColSpan() > 1) {
-                        if (!cell.getCTTc().isSetTcPr())
-                            cell.getCTTc().addNewTcPr();
-                        CTHMerge hMerge = cell.getCTTc().getTcPr().isSetHMerge() ? cell.getCTTc().getTcPr().getHMerge()
-                                : cell.getCTTc().getTcPr().addNewHMerge();
-                        hMerge.setVal(STMerge.RESTART);
-                    } else if (cellData.getColSpan() == null || cellData.getColSpan() == 0) { // implicit continue if we
-                                                                                              // track it, leaving blank
-                                                                                              // for simplicity unless
-                                                                                              // specifically passed
-                        // Usually horizontal merge continuous cells are dropped from the array, but if
-                    }
-
-                    if (cellData.getVMerge() != null) {
-                        if (!cell.getCTTc().isSetTcPr())
-                            cell.getCTTc().addNewTcPr();
-                        CTVMerge vMerge = cell.getCTTc().getTcPr().isSetVMerge() ? cell.getCTTc().getTcPr().getVMerge()
-                                : cell.getCTTc().getTcPr().addNewVMerge();
-                        if ("restart".equalsIgnoreCase(cellData.getVMerge())) {
-                            vMerge.setVal(STMerge.RESTART);
-                        } else {
-                            vMerge.setVal(STMerge.CONTINUE);
-                        }
-                    }
+                for (int i = 0; i < rowData.getCells().size(); i++) {
+                    XWPFTableCell cell = (i < row.getTableCells().size()) ? row.getCell(i) : row.addNewTableCell();
+                    DocumentMetadataResponse.TableCellData cellData = rowData.getCells().get(i);
 
                     if (cellData.getCellContent() != null && !cellData.getCellContent().isEmpty()) {
-                        if (!cell.getParagraphs().isEmpty()) {
-                            cell.removeParagraph(0);
+                        // Очищаем ячейку аккуратно
+                        for (int pIdx = cell.getParagraphs().size() - 1; pIdx >= 0; pIdx--) {
+                            cell.removeParagraph(pIdx);
                         }
+                        // Добавляем контент
                         for (DocumentMetadataResponse.DocumentBlock contentBlock : cellData.getCellContent()) {
-                            if ("PARAGRAPH".equals(contentBlock.getType())) {
-                                XWPFParagraph p = cell.addParagraph();
-                                if (contentBlock.getRuns() != null && !contentBlock.getRuns().isEmpty()) {
-                                    for (DocumentMetadataResponse.RunData subRun : contentBlock.getRuns()) {
-                                        createRun(p, subRun, jobId);
-                                    }
-                                } else if (contentBlock.getImageName() != null) {
-                                    injectImage(p, contentBlock.getImageName(), contentBlock.getImageContentType(),
-                                            jobId);
-                                } else if (contentBlock.getText() != null) {
-                                    p.createRun().setText(contentBlock.getText());
+                            XWPFParagraph p = cell.addParagraph(); // Гарантированно добавляем параграф!
+                            if ("PARAGRAPH".equals(contentBlock.getType()) && contentBlock.getRuns() != null) {
+                                for (DocumentMetadataResponse.RunData subRun : contentBlock.getRuns()) {
+                                    createRun(p, subRun, jobId);
                                 }
+                            } else if (contentBlock.getText() != null) {
+                                p.createRun().setText(contentBlock.getText());
                             }
                         }
-                    } else if (cellData.getText() != null) {
-                        // Will write into the default created paragraph
-                        cell.setText(cellData.getText());
+                    } else {
+                        // Обычный текст
+                        cell.setText(cellData.getText() != null ? cellData.getText() : "");
+                    }
+
+                    // Защита: Если ячейка осталась вообще без параграфов - добавляем пустой
+                    if (cell.getParagraphs().isEmpty()) {
+                        cell.addParagraph();
                     }
                 }
             }
@@ -473,7 +482,8 @@ public class DocxGeneratorService {
             String jobId) {
         // Headers/footers usually wrap a list of actual blocks (paragraphs/tables)
         // inside their "cellContent" or similar property
-        //, or they might just contain text directly, but our DTO doesn't explicitly have
+        // , or they might just contain text directly, but our DTO doesn't explicitly
+        // have
         // a "children" list.
         // Assuming Header/Footer blocks have 'runs' or act like a single paragraph if
         // text exists,
