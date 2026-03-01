@@ -9,6 +9,7 @@ import dev.langchain4j.service.UserMessage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Qualifier;
 
 @Service
 public class SelfCorrectionService {
@@ -19,9 +20,10 @@ public class SelfCorrectionService {
     private final DocumentCorrector corrector;
     private final ObjectMapper objectMapper;
 
-    public SelfCorrectionService(ChatLanguageModel chatLanguageModel, ObjectMapper objectMapper) {
+    public SelfCorrectionService(
+            @Qualifier("coderModel") ChatLanguageModel chatLanguageModel,
+            ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
-        // LangChain4j AI Services definition for agents
         this.validator = AiServices.create(DocumentValidator.class, chatLanguageModel);
         this.corrector = AiServices.create(DocumentCorrector.class, chatLanguageModel);
     }

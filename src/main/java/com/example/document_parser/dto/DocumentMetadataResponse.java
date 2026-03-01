@@ -58,6 +58,7 @@ public class DocumentMetadataResponse {
         private Double lineSpacing;
         private List<RunData> runs;
         private String listLevel;
+        private String listNumId;
         private Integer rowsCount;
         private Integer columnsCount;
         private List<TableRowData> tableRows;

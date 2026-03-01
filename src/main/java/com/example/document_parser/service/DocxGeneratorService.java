@@ -2,12 +2,12 @@ package com.example.document_parser.service;
 
 import com.example.document_parser.dto.DocumentMetadataResponse;
 import org.apache.poi.xwpf.usermodel.*;
-import org.apache.poi.ooxml.POIXMLDocumentPart;
 import org.apache.poi.util.Units;
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Service;
 
 import javax.imageio.ImageIO;
@@ -15,14 +15,13 @@ import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.math.BigInteger;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
 import java.util.Map;
-
-import java.io.InputStream;
 
 @Service
 public class DocxGeneratorService {
@@ -32,8 +31,18 @@ public class DocxGeneratorService {
     @Value("${app.upload.dir:/tmp/docs}")
     private String uploadDir;
 
+    // ОБНОВЛЕННЫЙ МЕТОД: Автоматически ищет base_template.docx в ресурсах
     public File generateDocument(DocumentMetadataResponse metadata, String jobId) throws Exception {
-        return generateDocument(metadata, jobId, null);
+        ClassPathResource resource = new ClassPathResource("base_template.docx");
+        InputStream templateStream = resource.exists() ? resource.getInputStream() : null;
+
+        if (templateStream == null) {
+            log.warn("base_template.docx не найден в src/main/resources/. Используется пустой документ.");
+        } else {
+            log.info("Используется шаблон base_template.docx");
+        }
+
+        return generateDocument(metadata, jobId, templateStream);
     }
 
     public File generateDocument(DocumentMetadataResponse metadata, String jobId, InputStream templateStream)
@@ -42,7 +51,18 @@ public class DocxGeneratorService {
 
         try (XWPFDocument document = templateStream != null ? new XWPFDocument(templateStream) : new XWPFDocument()) {
 
+            // ХАК ДЛЯ ШАБЛОНА: Пустой Word файл всегда содержит один пустой параграф.
+            // Мы удаляем его, чтобы наш текст не начинался со второй строки.
+            if (templateStream != null && document.getParagraphs().size() == 1) {
+                XWPFParagraph defaultParagraph = document.getParagraphs().getFirst();
+                if (defaultParagraph.getText().isEmpty()) {
+                    document.removeBodyElement(document.getPosOfParagraph(defaultParagraph));
+                }
+            }
+
             // 1. Setup Global Styles, Page Layout, and Numbering
+            // Если мы используем шаблон (templateStream != null), эти методы пропускаются,
+            // так как шаблон УЖЕ содержит идеальные стили и размеры страницы!
             if (templateStream == null) {
                 applyPageLayout(document, metadata.getStats());
                 applyStyles(document, metadata.getDocumentStyles());
@@ -57,16 +77,18 @@ public class DocxGeneratorService {
                         continue;
                     }
 
-                    if ("PARAGRAPH".equals(block.getType()) || "LIST_ITEM".equals(block.getType())
-                            || "CODE_BLOCK".equals(block.getType())) {
+                    String type = block.getType() != null ? block.getType() : "";
+
+                    if ("PARAGRAPH".equalsIgnoreCase(type) || "LIST_ITEM".equalsIgnoreCase(type)
+                            || "CODE_BLOCK".equalsIgnoreCase(type) || "EMBEDDED_OBJECT".equalsIgnoreCase(type)) {
                         createParagraph(document, block, jobId);
-                    } else if ("TABLE".equals(block.getType())) {
+                    } else if ("TABLE".equalsIgnoreCase(type)) {
                         createTable(document, block, jobId);
                     }
                 }
             }
 
-            // 5. Splice Headers/Footers
+            // 3. Splice Headers/Footers
             applyHeadersAndFooters(document, metadata.getContentBlocks(), jobId);
 
             File tempFile = File.createTempFile("generated_" + jobId, ".docx");
@@ -77,6 +99,7 @@ public class DocxGeneratorService {
             return tempFile;
         }
     }
+
 
     private void applyPageLayout(XWPFDocument document, DocumentMetadataResponse.DocumentStats stats) {
         if (stats == null || stats.getPageLayout() == null)
@@ -256,68 +279,54 @@ public class DocxGeneratorService {
     private void createParagraph(XWPFDocument document, DocumentMetadataResponse.DocumentBlock block, String jobId) {
         XWPFParagraph p = document.createParagraph();
 
+        // 1. Отрисовка встроенных объектов (OLE)
+        if ("EMBEDDED_OBJECT".equalsIgnoreCase(block.getType())) {
+            XWPFRun r = p.createRun();
+            r.setBold(true);
+            r.setColor("FF0000"); // Красный цвет для заметности
+            r.setText("[Встроенный файл: " + block.getEmbeddedObjectName() + "]");
+            return; // Больше ничего не делаем
+        }
+
+        // 2. Обработка блоков кода
         if ("CODE_BLOCK".equalsIgnoreCase(block.getType())) {
-            org.openxmlformats.schemas.wordprocessingml.x2006.main.CTShd shd = p.getCTP().getPPr() != null
-                    && p.getCTP().getPPr().isSetShd()
-                            ? p.getCTP().getPPr().getShd()
-                            : (p.getCTP().getPPr() != null ? p.getCTP().getPPr().addNewShd()
-                                    : p.getCTP().addNewPPr().addNewShd());
+            org.openxmlformats.schemas.wordprocessingml.x2006.main.CTShd shd = p.getCTP().getPPr() != null && p.getCTP().getPPr().isSetShd()
+                    ? p.getCTP().getPPr().getShd() : (p.getCTP().getPPr() != null ? p.getCTP().getPPr().addNewShd() : p.getCTP().addNewPPr().addNewShd());
             shd.setFill("F4F4F4");
 
             String codeText = block.getText() != null ? block.getText() : "";
-            if (codeText.startsWith("```")) {
-                int firstNewline = codeText.indexOf('\n');
-                if (firstNewline != -1) {
-                    codeText = codeText.substring(firstNewline + 1);
-                }
-                if (codeText.endsWith("```")) {
-                    codeText = codeText.substring(0, codeText.length() - 3);
-                }
-                codeText = codeText.stripTrailing();
-            }
+            codeText = codeText.replaceAll("^```[a-zA-Z]*\n?", "").replaceAll("```$", "").trim();
 
             String[] lines = codeText.split("\n");
             for (int i = 0; i < lines.length; i++) {
                 XWPFRun r = p.createRun();
                 r.setText(lines[i]);
                 r.setFontFamily("Consolas");
-                if (i < lines.length - 1) {
-                    r.addBreak();
-                }
+                if (i < lines.length - 1) r.addBreak();
             }
             return;
         }
 
-        if (block.getStyleName() != null) {
-            p.setStyle(block.getStyleName());
-        }
-
+        // 3. Стили и выравнивание
+        if (block.getStyleName() != null) p.setStyle(block.getStyleName());
         if (block.getAlignment() != null) {
-            try {
-                p.setAlignment(ParagraphAlignment.valueOf(block.getAlignment()));
-            } catch (Exception ignored) {
-            }
+            try { p.setAlignment(ParagraphAlignment.valueOf(block.getAlignment())); } catch (Exception ignored) {}
         }
 
-        if (block.getIndentFirstLine() != null)
-            p.setIndentationFirstLine(block.getIndentFirstLine());
-        if (block.getIndentLeft() != null)
-            p.setIndentationLeft(block.getIndentLeft());
-        if (block.getSpacingBefore() != null)
-            p.setSpacingBefore(block.getSpacingBefore());
-        if (block.getSpacingAfter() != null)
-            p.setSpacingAfter(block.getSpacingAfter());
-        if (block.getLineSpacing() != null)
-            p.setSpacingBetween(block.getLineSpacing());
+        // 4. Отступы
+        if (block.getIndentFirstLine() != null) p.setIndentationFirstLine(block.getIndentFirstLine());
+        if (block.getIndentLeft() != null) p.setIndentationLeft(block.getIndentLeft());
+        if (block.getSpacingBefore() != null) p.setSpacingBefore(block.getSpacingBefore());
+        if (block.getSpacingAfter() != null) p.setSpacingAfter(block.getSpacingAfter());
 
+        // 5. ИСПРАВЛЕНО: Правильная нумерация списков (NumID)
         if ("LIST_ITEM".equalsIgnoreCase(block.getType()) || block.getListLevel() != null) {
-            // Apply List Level NumId (Usually 1 for single lists) and ILvl
-            p.setNumID(BigInteger.valueOf(1));
-            p.getCTP().getPPr().getNumPr().addNewIlvl()
-                    .setVal(BigInteger
-                            .valueOf(Long.parseLong(block.getListLevel() != null ? block.getListLevel() : "0")));
+            BigInteger numId = block.getListNumId() != null ? new BigInteger(block.getListNumId()) : BigInteger.valueOf(1);
+            p.setNumID(numId);
+            p.getCTP().getPPr().getNumPr().addNewIlvl().setVal(BigInteger.valueOf(Long.parseLong(block.getListLevel() != null ? block.getListLevel() : "0")));
         }
 
+        // 6. Наполнение контентом
         if (block.getRuns() != null && !block.getRuns().isEmpty()) {
             for (DocumentMetadataResponse.RunData runData : block.getRuns()) {
                 createRun(p, runData, jobId);
@@ -377,22 +386,26 @@ public class DocxGeneratorService {
     private void injectImage(XWPFParagraph p, String imageName, String contentType, String jobId) {
         try {
             String shard = jobId.replace("-", "").substring(0, 4);
-            Path imagePath = Paths.get(uploadDir, "images", shard.substring(0, 2), shard.substring(2, 4), jobId,
-                    imageName);
+            Path imagePath = Paths.get(uploadDir, "images", shard.substring(0, 2), shard.substring(2, 4), jobId, imageName);
 
             if (Files.exists(imagePath)) {
                 XWPFRun r = p.createRun();
                 int pictureType = getPictureType(contentType);
 
                 try (FileInputStream is = new FileInputStream(imagePath.toFile())) {
-                    BufferedImage bimg = ImageIO.read(imagePath.toFile());
-                    int width = bimg.getWidth();
-                    int height = bimg.getHeight();
-                    // Convert pixels to EMU
-                    r.addPicture(is, pictureType, imageName, Units.toEMU(width), Units.toEMU(height));
+                    int widthEmu = Units.toEMU(300); // Фоллбэк размеры
+                    int heightEmu = Units.toEMU(200);
+                    try {
+                        BufferedImage bimg = ImageIO.read(imagePath.toFile());
+                        if (bimg != null) {
+                            widthEmu = Units.toEMU(bimg.getWidth());
+                            heightEmu = Units.toEMU(bimg.getHeight());
+                        }
+                    } catch (Exception graphicsError) {
+                        log.warn("AWT Graphics error (expected in Docker), using fallback size for image: {}", imageName);
+                    }
+                    r.addPicture(is, pictureType, imageName, widthEmu, heightEmu);
                 }
-            } else {
-                log.warn("Image {} not found at {} for job {}", imageName, imagePath, jobId);
             }
         } catch (Exception e) {
             log.error("Failed to inject image {}", imageName, e);
@@ -410,8 +423,7 @@ public class DocxGeneratorService {
     }
 
     private void createTable(XWPFDocument document, DocumentMetadataResponse.DocumentBlock block, String jobId) {
-        if (block.getTableRows() == null || block.getTableRows().isEmpty())
-            return;
+        if (block.getTableRows() == null || block.getTableRows().isEmpty()) return;
 
         XWPFTable table = document.createTable();
         boolean isFirstRow = true;
@@ -425,31 +437,40 @@ public class DocxGeneratorService {
                     XWPFTableCell cell = (i < row.getTableCells().size()) ? row.getCell(i) : row.addNewTableCell();
                     DocumentMetadataResponse.TableCellData cellData = rowData.getCells().get(i);
 
+                    // ИСПРАВЛЕНО: Безопасный цвет ячейки (без краша на "auto")
+                    if (cellData.getBackgroundColor() != null && !"auto".equalsIgnoreCase(cellData.getBackgroundColor())) {
+                        cell.setColor(cellData.getBackgroundColor().replace("#", ""));
+                    }
+
+                    // ИСПРАВЛЕНО: Правильное горизонтальное объединение (GridSpan вместо HMerge)
+                    if (cellData.getColSpan() != null && cellData.getColSpan() > 1) {
+                        if (!cell.getCTTc().isSetTcPr()) cell.getCTTc().addNewTcPr();
+                        cell.getCTTc().getTcPr().addNewGridSpan().setVal(BigInteger.valueOf(cellData.getColSpan()));
+                    }
+
+                    // Вертикальное объединение
+                    if (cellData.getVMerge() != null) {
+                        if (!cell.getCTTc().isSetTcPr()) cell.getCTTc().addNewTcPr();
+                        CTVMerge vMerge = cell.getCTTc().getTcPr().isSetVMerge() ? cell.getCTTc().getTcPr().getVMerge() : cell.getCTTc().getTcPr().addNewVMerge();
+                        vMerge.setVal("restart".equalsIgnoreCase(cellData.getVMerge()) ? STMerge.RESTART : STMerge.CONTINUE);
+                    }
+
+                    // Контент ячейки
                     if (cellData.getCellContent() != null && !cellData.getCellContent().isEmpty()) {
-                        // Очищаем ячейку аккуратно
-                        for (int pIdx = cell.getParagraphs().size() - 1; pIdx >= 0; pIdx--) {
-                            cell.removeParagraph(pIdx);
-                        }
-                        // Добавляем контент
+                        for (int pIdx = cell.getParagraphs().size() - 1; pIdx >= 0; pIdx--) cell.removeParagraph(pIdx); // Очистка
                         for (DocumentMetadataResponse.DocumentBlock contentBlock : cellData.getCellContent()) {
-                            XWPFParagraph p = cell.addParagraph(); // Гарантированно добавляем параграф!
-                            if ("PARAGRAPH".equals(contentBlock.getType()) && contentBlock.getRuns() != null) {
-                                for (DocumentMetadataResponse.RunData subRun : contentBlock.getRuns()) {
-                                    createRun(p, subRun, jobId);
-                                }
+                            XWPFParagraph p = cell.addParagraph();
+                            if (contentBlock.getRuns() != null && !contentBlock.getRuns().isEmpty()) {
+                                for (DocumentMetadataResponse.RunData subRun : contentBlock.getRuns()) createRun(p, subRun, jobId);
                             } else if (contentBlock.getText() != null) {
                                 p.createRun().setText(contentBlock.getText());
                             }
                         }
                     } else {
-                        // Обычный текст
                         cell.setText(cellData.getText() != null ? cellData.getText() : "");
                     }
 
-                    // Защита: Если ячейка осталась вообще без параграфов - добавляем пустой
-                    if (cell.getParagraphs().isEmpty()) {
-                        cell.addParagraph();
-                    }
+                    if (cell.getParagraphs().isEmpty()) cell.addParagraph(); // Страховка от краша Word
                 }
             }
         }

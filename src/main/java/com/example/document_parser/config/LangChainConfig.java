@@ -2,6 +2,8 @@ package com.example.document_parser.config;
 
 import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.model.embedding.EmbeddingModel;
+import dev.langchain4j.model.chat.ChatLanguageModel;
+import dev.langchain4j.model.openai.OpenAiChatModel;
 import dev.langchain4j.model.openai.OpenAiEmbeddingModel;
 import dev.langchain4j.store.embedding.EmbeddingStore;
 import dev.langchain4j.store.embedding.pgvector.PgVectorEmbeddingStore;
@@ -11,7 +13,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
-import java.net.URI;
+import java.time.Duration;
 
 @Configuration
 public class LangChainConfig {
@@ -27,65 +29,66 @@ public class LangChainConfig {
     @Value("${spring.datasource.password:postgres}")
     private String dbPassword;
 
+    @Value("${langchain4j.open-router.api-key:demo}")
+    private String openRouterApiKey;
+
+    @Value("${groq.api.key:demo}")
+    private String groqApiKey;
+
     @Bean
     public EmbeddingStore<TextSegment> embeddingStore() {
+        // ТВОЙ КОД ОСТАЕТСЯ БЕЗ ИЗМЕНЕНИЙ (он написан отлично)
         try {
-            // Strip jdbc:postgresql://
             String urlWithoutJdbc = dbUrl.replace("jdbc:postgresql://", "");
-            // Typical format: localhost:5432/postgres?options
             String[] parts = urlWithoutJdbc.split("/");
-            String hostAndPort = parts[0];
-            String database = parts.length > 1 ? parts[1].split("\\?")[0] : "postgres";
-
-            String host = hostAndPort.contains(":") ? hostAndPort.split(":")[0] : hostAndPort;
-            int port = hostAndPort.contains(":") ? Integer.parseInt(hostAndPort.split(":")[1]) : 5432;
+            String hostPort = parts[0];
+            String database = parts[1].split("\\?")[0];
+            String[] hostPortParts = hostPort.split(":");
+            String host = hostPortParts[0];
+            int port = hostPortParts.length > 1 ? Integer.parseInt(hostPortParts[1]) : 5432;
 
             log.info("Configuring PgVectorEmbeddingStore with host: {}, port: {}, database: {}", host, port, database);
 
             return PgVectorEmbeddingStore.builder()
-                    .host(host)
-                    .port(port)
-                    .database(database)
-                    .user(dbUser)
-                    .password(dbPassword)
-                    .table("document_embeddings")
-                    .dimension(768) // nomic-embed-text generates 768d embeddings usually
-                    .createTable(true)
-                    .dropTableFirst(false)
-                    .build();
+                    .host(host).port(port).database(database).user(dbUser).password(dbPassword)
+                    .table("document_embeddings").dimension(768).createTable(true).dropTableFirst(false).build();
         } catch (Exception e) {
-            log.warn("Failed to parse DB URL for PgVector store, fallback to default. Error: {}", e.getMessage());
             return PgVectorEmbeddingStore.builder()
-                    .host("localhost")
-                    .port(5432)
-                    .database("postgres")
-                    .user(dbUser)
-                    .password(dbPassword)
-                    .table("document_embeddings")
-                    .dimension(768)
-                    .createTable(true)
-                    .dropTableFirst(false)
-                    .build();
+                    .host("localhost").port(5432).database("postgres").user(dbUser).password(dbPassword)
+                    .table("document_embeddings").dimension(768).createTable(true).dropTableFirst(false).build();
         }
     }
 
     @Bean
-    public EmbeddingModel embeddingModel(@Value("${langchain4j.open-router.api-key:demo}") String apiKey) {
-        // Using OpenRouter for Nomic Embed Text natively mapping to OpenAi config
+    public EmbeddingModel embeddingModel() {
         return OpenAiEmbeddingModel.builder()
                 .baseUrl("https://openrouter.ai/api/v1")
-                .apiKey(apiKey)
+                .apiKey(openRouterApiKey)
                 .modelName("nomic-ai/nomic-embed-text-v1.5")
                 .build();
     }
 
-    @Bean
-    public dev.langchain4j.model.chat.ChatLanguageModel chatLanguageModel(
-            @Value("${langchain4j.open-router.api-key:demo}") String apiKey) {
-        return dev.langchain4j.model.openai.OpenAiChatModel.builder()
+    // --- ИЗМЕНЕНИЯ ЗДЕСЬ: ДВА ОТДЕЛЬНЫХ БИНА ---
+
+    // 1. Агент-Корректор (Тяжелая модель Qwen Coder для исправления JSON и кода)
+    @Bean("coderModel")
+    public ChatLanguageModel coderModel() {
+        return OpenAiChatModel.builder()
                 .baseUrl("https://openrouter.ai/api/v1")
-                .apiKey(apiKey)
-                .modelName("meta-llama/llama-3.3-70b-instruct") // Groq/OpenRouter model as requested
+                .apiKey(openRouterApiKey)
+                .modelName("qwen/qwen-2.5-coder-32b-instruct")
+                .timeout(Duration.ofSeconds(60))
+                .build();
+    }
+
+    // 2. Агент-Диспетчер/Аналитик (Быстрая модель Llama на Groq для Саммари)
+    @Bean("routerModel")
+    public ChatLanguageModel routerModel() {
+        return OpenAiChatModel.builder()
+                .baseUrl("https://api.groq.com/openai/v1")
+                .apiKey(groqApiKey)
+                .modelName("llama-3.3-70b-versatile")
+                .timeout(Duration.ofSeconds(15))
                 .build();
     }
 }

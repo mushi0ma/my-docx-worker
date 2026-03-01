@@ -11,16 +11,16 @@ services:
       REDIS_HOST: redis
       TEMP_DOCS_PATH: /app/temp_docs
       IMAGE_STORAGE_PATH: /app/images
+      groq.api.key: ${GROQ_API_KEY}
+      langchain4j.open-router.api-key: ${OPENROUTER_API_KEY}
     volumes:
       - temp_docs_volume:/app/temp_docs
-      # НОВОЕ: отдельный volume для картинок (шардированная структура)
       - images_volume:/app/images
     depends_on:
       rabbitmq:
         condition: service_healthy
       redis:
         condition: service_healthy
-    # НОВОЕ: healthcheck через Actuator
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8081/actuator/health"]
       interval: 15s

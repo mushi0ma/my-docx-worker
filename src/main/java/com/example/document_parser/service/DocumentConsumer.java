@@ -1,6 +1,8 @@
 package com.example.document_parser.service;
 
+import com.example.document_parser.config.StorageConfig;
 import com.example.document_parser.dto.DocumentMetadataResponse;
+import com.example.document_parser.dto.GenerateDocumentRequest;
 import com.example.document_parser.entity.DocumentEntity;
 import com.example.document_parser.model.JobStatus;
 import com.example.document_parser.repository.DocumentRepository;
@@ -12,10 +14,11 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
+import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.time.Duration;
 
 @Service
@@ -25,6 +28,8 @@ public class DocumentConsumer {
 
     private final DocxParserService parserService;
     private final DocxGeneratorService generatorService;
+    private final SelfCorrectionService selfCorrectionService;
+    private final VectorizationService vectorizationService;
     private final WebhookService webhookService;
     private final StringRedisTemplate redisTemplate;
     private final DocumentRepository documentRepository;
@@ -35,22 +40,26 @@ public class DocumentConsumer {
     private long resultTtlSeconds;
 
     public DocumentConsumer(DocxParserService parserService,
-            DocxGeneratorService generatorService,
-            WebhookService webhookService,
-            StringRedisTemplate redisTemplate,
-            DocumentRepository documentRepository,
-            ObjectMapper objectMapper,
-            @Value("${app.upload.dir:/tmp/docs}") String uploadDir) {
+                            DocxGeneratorService generatorService,
+                            SelfCorrectionService selfCorrectionService,
+                            VectorizationService vectorizationService,
+                            WebhookService webhookService,
+                            StringRedisTemplate redisTemplate,
+                            DocumentRepository documentRepository,
+                            ObjectMapper objectMapper,
+                            StorageConfig storageConfig) {
         this.parserService = parserService;
         this.generatorService = generatorService;
+        this.selfCorrectionService = selfCorrectionService;
+        this.vectorizationService = vectorizationService;
         this.webhookService = webhookService;
         this.redisTemplate = redisTemplate;
         this.documentRepository = documentRepository;
         this.objectMapper = objectMapper;
-        this.tempStorage = Paths.get(uploadDir);
+        this.tempStorage = storageConfig.getTempStoragePath();
     }
 
-    @SuppressWarnings("unused") // ИСПРАВЛЕНО: Подавляем предупреждение IDE о неиспользуемом методе
+    @SuppressWarnings("unused")
     @RabbitListener(queues = "${app.rabbitmq.queue}")
     public void processDocument(String message) {
         if (message == null || message.isBlank()) {
@@ -74,71 +83,10 @@ public class DocumentConsumer {
 
         try {
             if ("GENERATE".equals(taskType)) {
-                entity.updateProgress(10, JobStatus.PROCESSING);
-                documentRepository.save(entity);
-
-                String inputJson = redisTemplate.opsForValue().get("job:" + jobId + ":generate_input");
-                if (inputJson == null) {
-                    throw new RuntimeException("Missing GenerateDocumentRequest input JSON in Redis");
-                }
-                com.example.document_parser.dto.GenerateDocumentRequest request = objectMapper.readValue(inputJson,
-                        com.example.document_parser.dto.GenerateDocumentRequest.class);
-
-                entity.updateProgress(50, JobStatus.PROCESSING);
-                documentRepository.save(entity);
-
-                java.io.File generatedFile;
-                if (request.getTemplateId() != null && !request.getTemplateId().isBlank()) {
-                    Path templatePath = tempStorage.resolve("templates").resolve(request.getTemplateId() + ".docx");
-                    if (Files.exists(templatePath)) {
-                        try (java.io.InputStream is = Files.newInputStream(templatePath)) {
-                            generatedFile = generatorService.generateDocument(request.getMetadata(), jobId, is);
-                        }
-                    } else {
-                        log.warn("Template {} not found, generating from scratch", request.getTemplateId());
-                        generatedFile = generatorService.generateDocument(request.getMetadata(), jobId, null);
-                    }
-                } else {
-                    generatedFile = generatorService.generateDocument(request.getMetadata(), jobId, null);
-                }
-
-                entity.updateProgress(100, JobStatus.SUCCESS);
-                documentRepository.save(entity);
-                log.info("✅ [{}] Генерация завершена", jobId);
-
-                webhookService.sendWebhook(entity.getWebhookUrl(), jobId, "SUCCESS", "Generation complete",
-                        "/api/v1/documents/" + jobId + "/download");
-
+                processGenerateTask(jobId, entity);
             } else {
-                Path filePath = tempStorage.resolve(jobId + ".docx");
-                if (!filePath.toFile().exists()) {
-                    log.error("❌ [{}] Файл не найден: {}", jobId, filePath);
-                    saveError(jobId, originalName, "File not found on disk", ttl);
-                    return;
-                }
-
-                entity.updateProgress(10, JobStatus.PROCESSING);
-                documentRepository.save(entity);
-
-                DocumentMetadataResponse response = parserService.parseDocument(
-                        filePath.toFile(), originalName, jobId);
-
-                entity.updateProgress(80, JobStatus.PROCESSING);
-                documentRepository.save(entity);
-
-                String jsonResult = objectMapper.writeValueAsString(response);
-                redisTemplate.opsForValue().set("job:" + jobId, jsonResult, ttl);
-
-                entity.setResultJson(jsonResult);
-                entity.updateProgress(100, JobStatus.SUCCESS);
-                documentRepository.save(entity);
-
-                log.info("✅ [{}] Парсинг завершен успешно", jobId);
-
-                webhookService.sendWebhook(entity.getWebhookUrl(), jobId, "SUCCESS", "Parsing complete",
-                        "/api/v1/documents/" + jobId);
+                processParseTask(jobId, originalName, entity, ttl);
             }
-
         } catch (Exception e) {
             log.error("❌ [{}] Ошибка: {}", jobId, e.getMessage(), e);
             saveError(jobId, originalName, e.getMessage(), ttl);
@@ -148,6 +96,87 @@ public class DocumentConsumer {
                 deleteQuietly(tempStorage.resolve(jobId + ".docx"));
             }
         }
+    }
+
+    private void processGenerateTask(String jobId, DocumentEntity entity) throws Exception {
+        entity.updateProgress(10, JobStatus.PROCESSING);
+        documentRepository.save(entity);
+
+        String inputJson = redisTemplate.opsForValue().get("job:" + jobId + ":generate_input");
+        if (inputJson == null) {
+            throw new RuntimeException("Missing GenerateDocumentRequest input JSON in Redis");
+        }
+
+        GenerateDocumentRequest request = objectMapper.readValue(inputJson, GenerateDocumentRequest.class);
+
+        entity.updateProgress(50, JobStatus.PROCESSING);
+        documentRepository.save(entity);
+
+        File generatedFile;
+        if (request.getTemplateId() != null && !request.getTemplateId().isBlank()) {
+            Path templatePath = tempStorage.resolve("templates").resolve(request.getTemplateId() + ".docx");
+            if (Files.exists(templatePath)) {
+                try (InputStream is = Files.newInputStream(templatePath)) {
+                    generatedFile = generatorService.generateDocument(request.getMetadata(), jobId, is);
+                }
+            } else {
+                log.warn("Template {} not found, generating from scratch", request.getTemplateId());
+                generatedFile = generatorService.generateDocument(request.getMetadata(), jobId, null);
+            }
+        } else {
+            generatedFile = generatorService.generateDocument(request.getMetadata(), jobId, null);
+        }
+
+        entity.updateProgress(100, JobStatus.SUCCESS);
+        documentRepository.save(entity);
+
+        // ИСПРАВЛЕНО 2: Используем переменную generatedFile для логов
+        log.info("✅ [{}] Генерация завершена. Файл сохранен: {}", jobId, generatedFile.getAbsolutePath());
+
+        webhookService.sendWebhook(entity.getWebhookUrl(), jobId, "SUCCESS", "Generation complete",
+                "/api/v1/documents/" + jobId + "/download");
+    }
+
+    private void processParseTask(String jobId, String originalName, DocumentEntity entity, Duration ttl) throws Exception {
+        Path filePath = tempStorage.resolve(jobId + ".docx");
+        if (!filePath.toFile().exists()) {
+            log.error("❌ [{}] Файл не найден: {}", jobId, filePath);
+            saveError(jobId, originalName, "File not found on disk", ttl);
+            return;
+        }
+
+        entity.updateProgress(10, JobStatus.PROCESSING);
+        documentRepository.save(entity);
+
+        DocumentMetadataResponse rawResponse = parserService.parseDocument(filePath.toFile(), originalName, jobId);
+
+        entity.updateProgress(50, JobStatus.PROCESSING);
+        documentRepository.save(entity);
+
+        log.info("🤖 [{}] Запуск AI-проверки и самокоррекции...", jobId);
+        // ИСПРАВЛЕНО 1: Правильное имя метода
+        DocumentMetadataResponse cleanResponse = selfCorrectionService.validateAndCorrect(rawResponse);
+
+        entity.updateProgress(70, JobStatus.PROCESSING);
+        documentRepository.save(entity);
+
+        String jsonResult = objectMapper.writeValueAsString(cleanResponse);
+        redisTemplate.opsForValue().set("job:" + jobId, jsonResult, ttl);
+        entity.setResultJson(jsonResult);
+
+        entity.updateProgress(90, JobStatus.PROCESSING);
+        documentRepository.save(entity);
+
+        log.info("🧠 [{}] Запуск векторизации для RAG...", jobId);
+        vectorizationService.vectorizeAndStore(cleanResponse, jobId);
+
+        entity.updateProgress(100, JobStatus.SUCCESS);
+        documentRepository.save(entity);
+
+        log.info("✅ [{}] Парсинг и ИИ-обработка завершены успешно", jobId);
+
+        webhookService.sendWebhook(entity.getWebhookUrl(), jobId, "SUCCESS", "Parsing and Vectorization complete",
+                "/api/v1/documents/" + jobId);
     }
 
     private void saveError(String jobId, String originalName, String message, Duration ttl) {

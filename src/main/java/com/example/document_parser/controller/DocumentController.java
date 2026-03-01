@@ -1,5 +1,6 @@
 package com.example.document_parser.controller;
 
+import com.example.document_parser.config.StorageConfig;
 import com.example.document_parser.dto.DocumentMetadataResponse;
 import com.example.document_parser.dto.GenerateDocumentRequest;
 import com.example.document_parser.entity.DocumentEntity;
@@ -7,12 +8,13 @@ import com.example.document_parser.exception.AppExceptions;
 import com.example.document_parser.export.DocumentExporter;
 import com.example.document_parser.model.JobStatus;
 import com.example.document_parser.repository.DocumentRepository;
+import com.example.document_parser.service.AiDocumentService;
 import com.example.document_parser.service.DocumentProducer;
 import com.example.document_parser.service.DocxGeneratorService;
+import com.example.document_parser.service.MarkdownService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -28,7 +30,6 @@ import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.util.List;
 import java.util.Map;
@@ -46,29 +47,32 @@ public class DocumentController {
     private final StringRedisTemplate redisTemplate;
     private final DocumentRepository documentRepository;
     private final ObjectMapper objectMapper;
-    private final DocxGeneratorService docxGeneratorService;
+    private final DocxGeneratorService docxGeneratorService; // Теперь инициализируется!
     private final Path tempStorage;
     private final Map<String, DocumentExporter> exporters;
+    private final AiDocumentService aiDocumentService;
+    private final MarkdownService markdownService;
 
+    // ИСПРАВЛЕНИЕ 1: Добавили DocxGeneratorService в параметры конструктора
     public DocumentController(DocumentProducer documentProducer,
-            StringRedisTemplate redisTemplate,
-            DocumentRepository documentRepository,
-            ObjectMapper objectMapper,
-            DocxGeneratorService docxGeneratorService,
-            List<DocumentExporter> exporterList,
-            @Value("${app.upload.dir:/tmp/docs}") String uploadDir) {
+                              StringRedisTemplate redisTemplate,
+                              DocumentRepository documentRepository,
+                              StorageConfig storageConfig,
+                              ObjectMapper objectMapper,
+                              List<DocumentExporter> exporterList,
+                              DocxGeneratorService docxGeneratorService,
+                              AiDocumentService aiDocumentService,
+                              MarkdownService markdownService) {
         this.documentProducer = documentProducer;
         this.redisTemplate = redisTemplate;
         this.documentRepository = documentRepository;
+        this.tempStorage = storageConfig.getTempStoragePath();
         this.objectMapper = objectMapper;
-        this.docxGeneratorService = docxGeneratorService;
-        this.exporters = exporterList.stream().collect(Collectors.toMap(DocumentExporter::format, Function.identity()));
-        this.tempStorage = Paths.get(uploadDir);
-        try {
-            Files.createDirectories(this.tempStorage);
-        } catch (IOException e) {
-            throw new RuntimeException("Не удалось создать директорию: " + uploadDir, e);
-        }
+        this.docxGeneratorService = docxGeneratorService; // Инициализация
+        this.aiDocumentService = aiDocumentService;
+        this.markdownService = markdownService;
+        this.exporters = exporterList.stream()
+                .collect(Collectors.toMap(DocumentExporter::format, Function.identity()));
     }
 
     @PostMapping(value = "/parse", consumes = MediaType.MULTIPART_FORM_DATA_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
@@ -135,7 +139,7 @@ public class DocumentController {
     @GetMapping(value = "/{jobId}/export/{format}")
     @Operation(summary = "Экспорт в форматы tsv, jsonl или markdown")
     public ResponseEntity<StreamingResponseBody> exportDocument(@PathVariable String jobId,
-            @PathVariable String format) {
+                                                                @PathVariable String format) {
         DocumentExporter exporter = exporters.get(format.toLowerCase());
         if (exporter == null)
             throw new IllegalArgumentException("Unsupported format: " + format);
@@ -214,6 +218,21 @@ public class DocumentController {
             throw new AppExceptions.JobNotFoundException("Image not found: " + imageName);
         } catch (IOException e) {
             throw new RuntimeException("Error reading image", e);
+        }
+    }
+
+    @Operation(summary = "Получить интеллектуальную выжимку документа (AI Summary)")
+    @GetMapping(value = "/{jobId}/ai/summary", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<String> getAiSummary(@PathVariable String jobId) {
+        // ИСПРАВЛЕНИЕ 2: используем fetchResultString(jobId)
+        String resultJson = fetchResultString(jobId);
+        try {
+            DocumentMetadataResponse doc = objectMapper.readValue(resultJson, DocumentMetadataResponse.class);
+            String markdown = markdownService.toMarkdown(doc);
+            String aiResponse = aiDocumentService.generateSummary(markdown);
+            return ResponseEntity.ok(aiResponse);
+        } catch (Exception e) {
+            throw new RuntimeException("Ошибка при вызове ИИ: " + e.getMessage(), e);
         }
     }
 

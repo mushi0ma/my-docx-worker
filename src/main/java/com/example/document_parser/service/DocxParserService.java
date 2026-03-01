@@ -317,6 +317,7 @@ public class DocxParserService {
                     .styleName(paragraph.getStyleID())
                     .alignment(paragraph.getAlignment() != null ? paragraph.getAlignment().name() : null)
                     .listLevel(paragraph.getNumIlvl() != null ? paragraph.getNumIlvl().toString() : null)
+                    .listNumId(paragraph.getNumID() != null ? paragraph.getNumID().toString() : null)
                     .indentFirstLine(
                             paragraph.getIndentationFirstLine() != -1 ? paragraph.getIndentationFirstLine() : null)
                     .indentLeft(paragraph.getIndentationLeft() != -1 ? paragraph.getIndentationLeft() : null)
