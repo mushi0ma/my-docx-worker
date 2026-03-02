@@ -10,7 +10,7 @@ import com.example.document_parser.export.DocumentExporter;
 import com.example.document_parser.model.JobStatus;
 import com.example.document_parser.repository.DocumentRepository;
 import com.example.document_parser.service.*;
-import tools.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.data.redis.core.StringRedisTemplate;

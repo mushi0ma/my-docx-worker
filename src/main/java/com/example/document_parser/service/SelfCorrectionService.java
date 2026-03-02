@@ -2,7 +2,7 @@ package com.example.document_parser.service;
 
 import com.example.document_parser.dto.DocumentMetadataResponse;
 import com.example.document_parser.service.ai.AiPrompts;
-import tools.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.langchain4j.model.chat.ChatLanguageModel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
