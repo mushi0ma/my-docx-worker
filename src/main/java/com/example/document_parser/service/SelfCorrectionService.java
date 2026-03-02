@@ -2,7 +2,7 @@ package com.example.document_parser.service;
 
 import com.example.document_parser.dto.DocumentMetadataResponse;
 import com.example.document_parser.service.ai.AiPrompts;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import dev.langchain4j.model.chat.ChatLanguageModel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -79,7 +79,7 @@ public class SelfCorrectionService {
 
         long total = doc.getContentBlocks().size();
         long emptyTextBlocks = doc.getContentBlocks().stream()
-                .filter(b -> !isVisualBlock(b))  // картинки и таблицы могут быть без text
+                .filter(b -> !isVisualBlock(b)) // картинки и таблицы могут быть без text
                 .filter(b -> b.getText() == null || b.getText().isBlank())
                 .count();
 
@@ -124,6 +124,10 @@ public class SelfCorrectionService {
                         fullJson.length(), doc.getFileName());
                 return correctBlockByBlock(doc);
             }
+        } catch (tools.jackson.core.JacksonException e) {
+            log.error("JSON serialization/deserialization failed during correction. file={}, error={}",
+                    doc.getFileName(), e.getMessage());
+            return doc;
         } catch (Exception e) {
             log.error("LLM correction failed, returning original. file={}, error={}",
                     doc.getFileName(), e.getMessage());
@@ -170,20 +174,26 @@ public class SelfCorrectionService {
             String prompt = AiPrompts.correctSingleBlock(blockJson);
             String fixed = stripMarkdownFences(correctorModel.generate(prompt));
             return objectMapper.readValue(fixed, DocumentMetadataResponse.DocumentBlock.class);
+        } catch (tools.jackson.core.JacksonException e) {
+            log.warn("Failed to parse fixed JSON for block type={}, keeping original. error={}",
+                    block.getType(), e.getMessage());
+            return block;
         } catch (Exception e) {
-            log.warn("Failed to correct block type={}, keeping original. error={}",
+            log.warn("LLM error while correcting block type={}, keeping original. error={}",
                     block.getType(), e.getMessage());
             return block;
         }
     }
 
     private boolean isBlockHealthy(DocumentMetadataResponse.DocumentBlock block) {
-        if (isVisualBlock(block)) return true;
+        if (isVisualBlock(block))
+            return true;
         return block.getText() != null && !block.getText().isBlank();
     }
 
     private String stripMarkdownFences(String json) {
-        if (json == null) return "{}";
+        if (json == null)
+            return "{}";
         String t = json.trim();
         if (t.startsWith("```")) {
             t = t.substring(t.indexOf('\n') + 1);

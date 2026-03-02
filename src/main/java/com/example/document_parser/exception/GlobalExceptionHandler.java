@@ -60,7 +60,21 @@ public class GlobalExceptionHandler {
     public ProblemDetail handleGeneric(Exception ex) {
         log.error("Unhandled exception", ex);
         return problem(HttpStatus.INTERNAL_SERVER_ERROR,
-                "Внутренняя ошибка сервера", "internal-error");
+                "Internal server error", "internal-error");
+    }
+
+    @ExceptionHandler(tools.jackson.core.JacksonException.class)
+    public ProblemDetail handleJacksonException(tools.jackson.core.JacksonException ex) {
+        log.error("JSON processing error: {}", ex.getMessage());
+        return problem(HttpStatus.BAD_REQUEST,
+                "Invalid JSON: " + ex.getOriginalMessage(), "json-error");
+    }
+
+    @ExceptionHandler(RuntimeException.class)
+    public ProblemDetail handleRuntimeException(RuntimeException ex) {
+        log.error("Runtime exception: {}", ex.getMessage(), ex);
+        return problem(HttpStatus.INTERNAL_SERVER_ERROR,
+                ex.getMessage() != null ? ex.getMessage() : "Unexpected error", "runtime-error");
     }
 
     @ExceptionHandler(IllegalArgumentException.class)
@@ -72,8 +86,7 @@ public class GlobalExceptionHandler {
     public ProblemDetail handleNoResourceFound(NoResourceFoundException ex) {
         return ProblemDetail.forStatusAndDetail(
                 HttpStatus.NOT_FOUND,
-                "Эндпоинт не найден. Убедитесь, что вы используете /export/tsv, а не просто /tsv"
-        );
+                "Эндпоинт не найден. Убедитесь, что вы используете /export/tsv, а не просто /tsv");
     }
 
     private ProblemDetail problem(HttpStatus status, String detail, String errorCode) {

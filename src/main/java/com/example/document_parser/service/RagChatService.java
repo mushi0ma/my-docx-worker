@@ -6,6 +6,9 @@ import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.model.chat.StreamingChatLanguageModel;
 import dev.langchain4j.model.embedding.EmbeddingModel;
+import dev.langchain4j.model.output.Response;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import io.github.resilience4j.retry.annotation.Retry;
 import dev.langchain4j.store.embedding.EmbeddingSearchRequest;
 import dev.langchain4j.store.embedding.EmbeddingSearchResult;
 import dev.langchain4j.store.embedding.EmbeddingStore;
@@ -24,8 +27,8 @@ import static dev.langchain4j.store.embedding.filter.MetadataFilterBuilder.metad
  * RAG-чат: диалог с конкретным документом через векторный поиск.
  *
  * Стратегия моделей:
- *   Основная:  qwen3-next-80b-a3b:free (OpenRouter) — 262K контекст
- *   Fallback:  openrouter/free — автовыбор любой доступной бесплатной модели
+ * Основная: qwen3-next-80b-a3b:free (OpenRouter) — 262K контекст
+ * Fallback: openrouter/free — автовыбор любой доступной бесплатной модели
  *
  * При 429 (rate limit) от основной модели автоматически переключается
  * на fallback без ошибки для пользователя.
@@ -48,10 +51,10 @@ public class RagChatService {
     private final SseEmitterFactory sseEmitterFactory;
 
     public RagChatService(EmbeddingStore<TextSegment> embeddingStore,
-                          EmbeddingModel embeddingModel,
-                          @Qualifier("streamingChatModel") StreamingChatLanguageModel chatModel,
-                          @Qualifier("streamingChatModelFallback") StreamingChatLanguageModel chatModelFallback,
-                          SseEmitterFactory sseEmitterFactory) {
+            EmbeddingModel embeddingModel,
+            @Qualifier("streamingChatModel") StreamingChatLanguageModel chatModel,
+            @Qualifier("streamingChatModelFallback") StreamingChatLanguageModel chatModelFallback,
+            SseEmitterFactory sseEmitterFactory) {
         this.embeddingStore = embeddingStore;
         this.embeddingModel = embeddingModel;
         this.chatModel = chatModel;
@@ -63,10 +66,24 @@ public class RagChatService {
      * Стриминговый ответ на вопрос по документу.
      * При rate limit основной модели — тихо переключается на fallback.
      */
+    @Retry(name = "ragChat")
+    @CircuitBreaker(name = "ragChat")
     public SseEmitter chatWithDocument(String jobId, String userQuestion) {
         log.info("RAG chat started. jobId={}, questionLength={}", jobId, userQuestion.length());
 
         String context = retrieveContext(jobId, userQuestion);
+
+        if ("Контекст по данному документу не найден.".equals(context)) {
+            SseEmitter emitter = new SseEmitter();
+            try {
+                emitter.send(context);
+                emitter.complete();
+            } catch (Exception e) {
+                emitter.completeWithError(e);
+            }
+            return emitter;
+        }
+
         String prompt = AiPrompts.ragChat(context, userQuestion);
 
         return sseEmitterFactory.streamWithFallback(
@@ -74,8 +91,7 @@ public class RagChatService {
                 chatModelFallback,
                 prompt,
                 "rag-chat/" + jobId,
-                RATE_LIMIT_MARKER
-        );
+                RATE_LIMIT_MARKER);
     }
 
     private String retrieveContext(String jobId, String question) {

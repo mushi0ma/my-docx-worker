@@ -6,7 +6,7 @@ import com.example.document_parser.dto.GenerateDocumentRequest;
 import com.example.document_parser.entity.DocumentEntity;
 import com.example.document_parser.model.JobStatus;
 import com.example.document_parser.repository.DocumentRepository;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -22,12 +22,13 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.Map;
 
 @Service
 public class DocumentConsumer {
 
     private static final Logger log = LoggerFactory.getLogger(DocumentConsumer.class);
-    private static final String MDC_JOB_ID_KEY = "jobId"; // Ключ для логов
+    private static final String MDC_JOB_ID_KEY = "jobId";
 
     private final DocxParserService parserService;
     private final DocxGeneratorService generatorService;
@@ -43,14 +44,14 @@ public class DocumentConsumer {
     private long resultTtlSeconds;
 
     public DocumentConsumer(DocxParserService parserService,
-                            DocxGeneratorService generatorService,
-                            SelfCorrectionService selfCorrectionService,
-                            VectorizationService vectorizationService,
-                            WebhookService webhookService,
-                            StringRedisTemplate redisTemplate,
-                            DocumentRepository documentRepository,
-                            ObjectMapper objectMapper,
-                            StorageConfig storageConfig) {
+            DocxGeneratorService generatorService,
+            SelfCorrectionService selfCorrectionService,
+            VectorizationService vectorizationService,
+            WebhookService webhookService,
+            StringRedisTemplate redisTemplate,
+            DocumentRepository documentRepository,
+            ObjectMapper objectMapper,
+            StorageConfig storageConfig) {
         this.parserService = parserService;
         this.generatorService = generatorService;
         this.selfCorrectionService = selfCorrectionService;
@@ -75,11 +76,12 @@ public class DocumentConsumer {
         String taskType = parts.length > 1 ? parts[1] : "PARSE";
         String originalName = parts.length > 2 ? parts[2] : jobId + ".docx";
 
-        // 1. ПОДКЛЮЧАЕМ MDC: Теперь все логи в этом потоке (даже в других сервисах) будут содержать jobId
+        // 1. ПОДКЛЮЧАЕМ MDC: Теперь все логи в этом потоке (даже в других сервисах)
+        // будут содержать jobId
         MDC.put(MDC_JOB_ID_KEY, jobId);
 
         try {
-            log.info("⏳ Начало обработки {}: {}", taskType, originalName);
+            log.info("Processing started. taskType={}, file={}", taskType, originalName);
 
             Duration ttl = Duration.ofSeconds(resultTtlSeconds);
             DocumentEntity entity = documentRepository.findById(jobId)
@@ -93,13 +95,15 @@ public class DocumentConsumer {
                 processParseTask(jobId, originalName, entity, ttl);
             }
         } catch (Exception e) {
-            log.error("❌ Ошибка: {}", e.getMessage(), e);
+            log.error("Processing failed. taskType={}, file={}, error={}",
+                    taskType, originalName, e.getMessage(), e);
             saveError(jobId, originalName, e.getMessage(), Duration.ofSeconds(resultTtlSeconds));
         } finally {
             if (!"GENERATE".equals(taskType)) {
                 deleteQuietly(tempStorage.resolve(jobId + ".docx"));
             }
-            // 2. ОБЯЗАТЕЛЬНО ОЧИЩАЕМ MDC, чтобы ID не "прилип" к другой задаче в этом потоке
+            // 2. ОБЯЗАТЕЛЬНО ОЧИЩАЕМ MDC, чтобы ID не "прилип" к другой задаче в этом
+            // потоке
             MDC.remove(MDC_JOB_ID_KEY);
         }
     }
@@ -110,7 +114,8 @@ public class DocumentConsumer {
         documentRepository.save(entity);
 
         String inputJson = redisTemplate.opsForValue().get("job:" + jobId + ":generate_input");
-        if (inputJson == null) throw new RuntimeException("Missing GenerateDocumentRequest input JSON in Redis");
+        if (inputJson == null)
+            throw new RuntimeException("Missing GenerateDocumentRequest input JSON in Redis");
 
         GenerateDocumentRequest request = objectMapper.readValue(inputJson, GenerateDocumentRequest.class);
         redisTemplate.delete("job:" + jobId + ":generate_input"); // Защита от утечки памяти
@@ -146,7 +151,8 @@ public class DocumentConsumer {
                 "/api/v1/documents/" + jobId + "/download");
     }
 
-    private void processParseTask(String jobId, String originalName, DocumentEntity entity, Duration ttl) throws Exception {
+    private void processParseTask(String jobId, String originalName, DocumentEntity entity, Duration ttl)
+            throws Exception {
         Path filePath = tempStorage.resolve(jobId + ".docx");
         if (!filePath.toFile().exists()) {
             log.error("❌ Файл не найден на диске");
@@ -201,16 +207,18 @@ public class DocumentConsumer {
     }
 
     private void saveError(String jobId, String originalName, String message, Duration ttl) {
-        String safe = message != null ? message.replace("\"", "'") : "Unknown error";
-        String errorJson = "{\"status\":\"" + JobStatus.ERROR.name() +
-                "\",\"jobId\":\"" + jobId + "\",\"message\":\"" + safe + "\"}";
         try {
+            Map<String, String> errorMap = Map.of(
+                    "status", JobStatus.ERROR.name(),
+                    "jobId", jobId,
+                    "message", message != null ? message : "Unknown error");
+            String errorJson = objectMapper.writeValueAsString(errorMap);
             redisTemplate.opsForValue().set("job:" + jobId, errorJson, ttl);
         } catch (Exception redisEx) {
-            log.error("❌ Не удалось записать ошибку в Redis", redisEx);
+            log.error("Failed to write error to Redis. jobId={}", jobId, redisEx);
         }
         DocumentEntity err = new DocumentEntity(jobId, JobStatus.ERROR, originalName, "PARSE", null);
-        err.setResultJson(safe);
+        err.setResultJson(message != null ? message : "Unknown error");
         documentRepository.save(err);
     }
 

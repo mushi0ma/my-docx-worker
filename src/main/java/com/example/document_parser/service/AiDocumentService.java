@@ -4,6 +4,8 @@ import com.example.document_parser.service.ai.AiPrompts;
 import com.example.document_parser.service.ai.SseEmitterFactory;
 import dev.langchain4j.model.chat.ChatLanguageModel;
 import dev.langchain4j.model.chat.StreamingChatLanguageModel;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import io.github.resilience4j.retry.annotation.Retry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -37,9 +39,16 @@ public class AiDocumentService {
     }
 
     /** Синхронный JSON-анализ. GET /ai/summary */
+    @Retry(name = "aiSummary", fallbackMethod = "summaryFallback")
+    @CircuitBreaker(name = "aiSummary", fallbackMethod = "summaryFallback")
     public String generateSummary(String markdownContent) {
         log.info("Generating AI summary (sync)");
         return summaryModel.generate(AiPrompts.summaryJson(truncate(markdownContent)));
+    }
+
+    public String summaryFallback(String markdownContent, Throwable t) {
+        log.error("AI summary generation or circuit broken: {}", t.getMessage());
+        return "{\"error\": \"К сожалению, не удалось сгенерировать саммари из-за недоступности AI сервиса.\"}";
     }
 
     /** Стриминговый Markdown-анализ. GET /ai/summary/stream */
@@ -48,13 +57,14 @@ public class AiDocumentService {
         return sseEmitterFactory.stream(
                 streamingSummaryModel,
                 AiPrompts.summaryMarkdownStream(truncate(markdownContent)),
-                "summary"
-        );
+                "summary");
     }
 
     private String truncate(String content) {
-        if (content == null) return "";
-        if (content.length() <= summaryMaxChars) return content;
+        if (content == null)
+            return "";
+        if (content.length() <= summaryMaxChars)
+            return content;
         return content.substring(0, summaryMaxChars)
                 + "\n\n...[ТЕКСТ ОБРЕЗАН, показаны первые " + summaryMaxChars + " символов]...";
     }

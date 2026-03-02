@@ -10,7 +10,7 @@ import com.example.document_parser.export.DocumentExporter;
 import com.example.document_parser.model.JobStatus;
 import com.example.document_parser.repository.DocumentRepository;
 import com.example.document_parser.service.*;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -53,19 +53,22 @@ public class DocumentController {
     private final AiDocumentService aiDocumentService;
     private final MarkdownService markdownService;
     private final RagChatService ragChatService;
-    private static final Pattern UUID_PATTERN = Pattern.compile("^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$");
+    private final DocumentAgentService documentAgentService;
+    private static final Pattern UUID_PATTERN = Pattern
+            .compile("^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$");
 
     // ИСПРАВЛЕНИЕ 1: Добавили DocxGeneratorService в параметры конструктора
     public DocumentController(DocumentProducer documentProducer,
-                              StringRedisTemplate redisTemplate,
-                              DocumentRepository documentRepository,
-                              StorageConfig storageConfig,
-                              ObjectMapper objectMapper,
-                              List<DocumentExporter> exporterList,
-                              DocxGeneratorService docxGeneratorService,
-                              AiDocumentService aiDocumentService,
-                              MarkdownService markdownService,
-                              RagChatService ragChatService) {
+            StringRedisTemplate redisTemplate,
+            DocumentRepository documentRepository,
+            StorageConfig storageConfig,
+            ObjectMapper objectMapper,
+            List<DocumentExporter> exporterList,
+            DocxGeneratorService docxGeneratorService,
+            AiDocumentService aiDocumentService,
+            MarkdownService markdownService,
+            RagChatService ragChatService,
+            DocumentAgentService documentAgentService) {
         this.documentProducer = documentProducer;
         this.redisTemplate = redisTemplate;
         this.documentRepository = documentRepository;
@@ -75,6 +78,7 @@ public class DocumentController {
         this.aiDocumentService = aiDocumentService;
         this.markdownService = markdownService;
         this.ragChatService = ragChatService;
+        this.documentAgentService = documentAgentService;
         this.exporters = exporterList.stream()
                 .collect(Collectors.toMap(DocumentExporter::format, Function.identity()));
     }
@@ -143,7 +147,7 @@ public class DocumentController {
     @GetMapping(value = "/{jobId}/export/{format}")
     @Operation(summary = "Экспорт в форматы tsv, jsonl или markdown")
     public ResponseEntity<StreamingResponseBody> exportDocument(@PathVariable String jobId,
-                                                                @PathVariable String format) {
+            @PathVariable String format) {
         DocumentExporter exporter = exporters.get(format.toLowerCase());
         if (exporter == null)
             throw new IllegalArgumentException("Unsupported format: " + format);
@@ -330,5 +334,34 @@ public class DocumentController {
     @Data
     public static class ChatRequest {
         private String question;
+    }
+
+    @Data
+    public static class AgentRequest {
+        private String instruction;
+    }
+
+    // 3. AI AGENT (Intelligent document operations)
+    @Operation(summary = "Execute AI agent instruction on document (sync)")
+    @PostMapping(value = "/{jobId}/agent", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<String> executeAgent(@PathVariable String jobId,
+            @RequestBody AgentRequest request) {
+        validateJobId(jobId);
+        if (request.getInstruction() == null || request.getInstruction().isBlank()) {
+            throw new IllegalArgumentException("Instruction cannot be empty");
+        }
+        String result = documentAgentService.executeAgent(jobId, request.getInstruction());
+        return ResponseEntity.ok(result);
+    }
+
+    @Operation(summary = "Execute AI agent instruction on document (SSE streaming)")
+    @PostMapping(value = "/{jobId}/agent/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter executeAgentStream(@PathVariable String jobId,
+            @RequestBody AgentRequest request) {
+        validateJobId(jobId);
+        if (request.getInstruction() == null || request.getInstruction().isBlank()) {
+            throw new IllegalArgumentException("Instruction cannot be empty");
+        }
+        return documentAgentService.executeAgentStream(jobId, request.getInstruction());
     }
 }
