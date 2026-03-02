@@ -1,76 +1,61 @@
 package com.example.document_parser.service;
 
-import dev.langchain4j.data.message.AiMessage;
+import com.example.document_parser.service.ai.AiPrompts;
+import com.example.document_parser.service.ai.SseEmitterFactory;
 import dev.langchain4j.model.chat.ChatLanguageModel;
 import dev.langchain4j.model.chat.StreamingChatLanguageModel;
-import dev.langchain4j.model.StreamingResponseHandler;
-import dev.langchain4j.model.output.Response;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
-import java.io.IOException;
-
+/**
+ * AI-сервис для анализа и суммаризации документов.
+ * Модель: Llama 4 Scout (Groq) — >460 токенов/сек, MoE 17B/109B.
+ */
 @Service
 public class AiDocumentService {
+
     private static final Logger log = LoggerFactory.getLogger(AiDocumentService.class);
 
-    private final StreamingChatLanguageModel streamingRouterModel;
-    private final ChatLanguageModel routerModel;
+    @Value("${app.ai.summary.max-chars:25000}")
+    private int summaryMaxChars;
 
-    // Внедряем СРАЗУ ДВЕ модели: для стриминга и для обычных ответов
+    private final StreamingChatLanguageModel streamingSummaryModel;
+    private final ChatLanguageModel summaryModel;
+    private final SseEmitterFactory sseEmitterFactory;
+
     public AiDocumentService(
-            @Qualifier("streamingRouterModel") StreamingChatLanguageModel streamingRouterModel,
-            @Qualifier("routerModel") ChatLanguageModel routerModel) {
-        this.streamingRouterModel = streamingRouterModel;
-        this.routerModel = routerModel;
+            @Qualifier("streamingSummaryModel") StreamingChatLanguageModel streamingSummaryModel,
+            @Qualifier("summaryModel") ChatLanguageModel summaryModel,
+            SseEmitterFactory sseEmitterFactory) {
+        this.streamingSummaryModel = streamingSummaryModel;
+        this.summaryModel = summaryModel;
+        this.sseEmitterFactory = sseEmitterFactory;
     }
 
-    // 1. СТАРЫЙ МЕТОД: Обычный JSON-ответ (Исправляет ошибку "Cannot resolve method")
+    /** Синхронный JSON-анализ. GET /ai/summary */
     public String generateSummary(String markdownContent) {
-        log.info("🤖 Запуск AI-анализа документа через Groq (Sync)...");
-        int maxLength = 25000;
-        String safeContent = markdownContent.length() > maxLength
-                ? markdownContent.substring(0, maxLength) + "\n\n...[ТЕКСТ ОБРЕЗАН]..."
-                : markdownContent;
-
-        String prompt = "Ты - IT-аналитик. Проанализируй этот документ и верни ответ СТРОГО в формате JSON без markdown оберток:\n" +
-                "{\n" +
-                "  \"documentType\": \"(Конспект/СӨЖ/Лабораторная/Отчет/Договор)\",\n" +
-                "  \"language\": \"(kk/ru/en)\",\n" +
-                "  \"summary\": \"(Краткая суть в 2 предложениях)\",\n" +
-                "  \"technologies\": [\"React\", \"JS\", ...]\n" +
-                "}\n\nДокумент:\n" + safeContent;
-
-        return routerModel.generate(prompt);
+        log.info("Generating AI summary (sync)");
+        return summaryModel.generate(AiPrompts.summaryJson(truncate(markdownContent)));
     }
 
-    // 2. НОВЫЙ МЕТОД: Стриминг (По буквам)
+    /** Стриминговый Markdown-анализ. GET /ai/summary/stream */
     public SseEmitter generateSummaryStream(String markdownContent) {
-        log.info("🤖 Запуск AI-стриминга через Groq...");
-        SseEmitter emitter = new SseEmitter(120000L);
+        log.info("Generating AI summary (streaming)");
+        return sseEmitterFactory.stream(
+                streamingSummaryModel,
+                AiPrompts.summaryMarkdownStream(truncate(markdownContent)),
+                "summary"
+        );
+    }
 
-        int maxLength = 25000;
-        String safeContent = markdownContent.length() > maxLength
-                ? markdownContent.substring(0, maxLength) + "\n\n...[ТЕКСТ ОБРЕЗАН]..."
-                : markdownContent;
-
-        String prompt = "Ты - IT-аналитик. Напиши красивое Markdown-резюме для этого документа. " +
-                "Укажи тип документа, язык, стек технологий и краткую суть.\n\nДокумент:\n" + safeContent;
-
-        streamingRouterModel.generate(prompt, new StreamingResponseHandler<AiMessage>() {
-            @Override
-            public void onNext(String token) {
-                try { emitter.send(token); } catch (IOException e) { emitter.completeWithError(e); }
-            }
-            @Override
-            public void onComplete(Response<AiMessage> response) { emitter.complete(); }
-            @Override
-            public void onError(Throwable error) { emitter.completeWithError(error); }
-        });
-
-        return emitter;
+    private String truncate(String content) {
+        if (content == null) return "";
+        if (content.length() <= summaryMaxChars) return content;
+        return content.substring(0, summaryMaxChars)
+                + "\n\n...[ТЕКСТ ОБРЕЗАН, показаны первые " + summaryMaxChars + " символов]...";
     }
 }

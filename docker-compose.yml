@@ -11,8 +11,11 @@ services:
       REDIS_HOST: redis
       TEMP_DOCS_PATH: /app/temp_docs
       IMAGE_STORAGE_PATH: /app/images
-      groq.api.key: ${GROQ_API_KEY}
-      langchain4j.open-router.api-key: ${OPENROUTER_API_KEY}
+      # Timezone — логи будут показывать время UTC+5 (Almaty)
+      TZ: Asia/Almaty
+      # API ключи — новые имена свойств (старый langchain4j.open-router.api-key удалён)
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
     volumes:
       - temp_docs_volume:/app/temp_docs
       - images_volume:/app/images

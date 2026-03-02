@@ -10,7 +10,7 @@ import com.example.document_parser.export.DocumentExporter;
 import com.example.document_parser.model.JobStatus;
 import com.example.document_parser.repository.DocumentRepository;
 import com.example.document_parser.service.*;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -35,6 +35,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Function;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @RestController
@@ -52,6 +53,7 @@ public class DocumentController {
     private final AiDocumentService aiDocumentService;
     private final MarkdownService markdownService;
     private final RagChatService ragChatService;
+    private static final Pattern UUID_PATTERN = Pattern.compile("^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$");
 
     // ИСПРАВЛЕНИЕ 1: Добавили DocxGeneratorService в параметры конструктора
     public DocumentController(DocumentProducer documentProducer,
@@ -213,6 +215,7 @@ public class DocumentController {
         validateJobId(jobId);
         try {
             String shard = jobId.replace("-", "").substring(0, 4);
+            validateImageName(imageName);
             Path imagePath = tempStorage.resolve("images").resolve(shard.substring(0, 2)).resolve(shard.substring(2, 4))
                     .resolve(jobId).resolve(imageName);
             if (Files.exists(imagePath)) {
@@ -302,7 +305,7 @@ public class DocumentController {
     }
 
     private void validateJobId(String jobId) {
-        if (jobId == null || !jobId.matches("[a-f0-9\\-]{36}"))
+        if (jobId == null || !UUID_PATTERN.matcher(jobId).matches())
             throw new AppExceptions.InvalidJobIdException(jobId);
     }
 
@@ -317,6 +320,11 @@ public class DocumentController {
         if (lower.endsWith(".webp"))
             return MediaType.parseMediaType("image/webp");
         return MediaType.APPLICATION_OCTET_STREAM;
+    }
+
+    private void validateImageName(String imageName) {
+        if (imageName == null || imageName.contains("..") || imageName.contains("/") || imageName.contains("\\"))
+            throw new AppExceptions.InvalidJobIdException("Invalid image name");
     }
 
     @Data

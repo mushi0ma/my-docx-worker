@@ -1,95 +1,101 @@
 package com.example.document_parser.service;
 
+import com.example.document_parser.service.ai.AiPrompts;
+import com.example.document_parser.service.ai.SseEmitterFactory;
 import dev.langchain4j.data.embedding.Embedding;
-import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.model.chat.StreamingChatLanguageModel;
 import dev.langchain4j.model.embedding.EmbeddingModel;
-import dev.langchain4j.model.StreamingResponseHandler;
-import dev.langchain4j.model.output.Response;
 import dev.langchain4j.store.embedding.EmbeddingSearchRequest;
 import dev.langchain4j.store.embedding.EmbeddingSearchResult;
 import dev.langchain4j.store.embedding.EmbeddingStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
-import java.io.IOException;
 import java.util.stream.Collectors;
 
 import static dev.langchain4j.store.embedding.filter.MetadataFilterBuilder.metadataKey;
 
+/**
+ * RAG-чат: диалог с конкретным документом через векторный поиск.
+ *
+ * Стратегия моделей:
+ *   Основная:  qwen3-next-80b-a3b:free (OpenRouter) — 262K контекст
+ *   Fallback:  openrouter/free — автовыбор любой доступной бесплатной модели
+ *
+ * При 429 (rate limit) от основной модели автоматически переключается
+ * на fallback без ошибки для пользователя.
+ */
 @Service
 public class RagChatService {
 
     private static final Logger log = LoggerFactory.getLogger(RagChatService.class);
 
+    // Код 429 в сообщении об ошибке — признак rate limit
+    private static final String RATE_LIMIT_MARKER = "429";
+
+    @Value("${app.ai.rag.max-results:5}")
+    private int ragMaxResults;
+
     private final EmbeddingStore<TextSegment> embeddingStore;
     private final EmbeddingModel embeddingModel;
     private final StreamingChatLanguageModel chatModel;
+    private final StreamingChatLanguageModel chatModelFallback;
+    private final SseEmitterFactory sseEmitterFactory;
 
     public RagChatService(EmbeddingStore<TextSegment> embeddingStore,
                           EmbeddingModel embeddingModel,
-                          @Qualifier("streamingChatModel") StreamingChatLanguageModel chatModel) {
+                          @Qualifier("streamingChatModel") StreamingChatLanguageModel chatModel,
+                          @Qualifier("streamingChatModelFallback") StreamingChatLanguageModel chatModelFallback,
+                          SseEmitterFactory sseEmitterFactory) {
         this.embeddingStore = embeddingStore;
         this.embeddingModel = embeddingModel;
         this.chatModel = chatModel;
+        this.chatModelFallback = chatModelFallback;
+        this.sseEmitterFactory = sseEmitterFactory;
     }
 
+    /**
+     * Стриминговый ответ на вопрос по документу.
+     * При rate limit основной модели — тихо переключается на fallback.
+     */
     public SseEmitter chatWithDocument(String jobId, String userQuestion) {
-        SseEmitter emitter = new SseEmitter(120000L);
+        log.info("RAG chat started. jobId={}, questionLength={}", jobId, userQuestion.length());
 
-        try {
-            log.info("🔍 Ищем контекст для вопроса: '{}' (Job ID: {})", userQuestion, jobId);
+        String context = retrieveContext(jobId, userQuestion);
+        String prompt = AiPrompts.ragChat(context, userQuestion);
 
-            // 1. Превращаем вопрос пользователя в вектор
-            Embedding questionEmbedding = embeddingModel.embed(userQuestion).content();
+        return sseEmitterFactory.streamWithFallback(
+                chatModel,
+                chatModelFallback,
+                prompt,
+                "rag-chat/" + jobId,
+                RATE_LIMIT_MARKER
+        );
+    }
 
-            // 2. Ищем похожие куски в базе (Строго фильтруем по конкретному документу!)
-            EmbeddingSearchRequest searchRequest = EmbeddingSearchRequest.builder()
-                    .queryEmbedding(questionEmbedding)
-                    .maxResults(5) // Берем 5 самых релевантных абзацев
-                    .filter(metadataKey("jobId").isEqualTo(jobId))
-                    .build();
+    private String retrieveContext(String jobId, String question) {
+        Embedding questionEmbedding = embeddingModel.embed(question).content();
 
-            EmbeddingSearchResult<TextSegment> searchResult = embeddingStore.search(searchRequest);
+        EmbeddingSearchRequest request = EmbeddingSearchRequest.builder()
+                .queryEmbedding(questionEmbedding)
+                .maxResults(ragMaxResults)
+                .filter(metadataKey("jobId").isEqualTo(jobId))
+                .build();
 
-            // 3. Собираем найденный текст в единый контекст
-            String context = searchResult.matches().stream()
-                    .map(match -> match.embedded().text())
-                    .collect(Collectors.joining("\n\n---\n\n"));
+        EmbeddingSearchResult<TextSegment> result = embeddingStore.search(request);
+        log.debug("RAG retrieved {} chunks. jobId={}", result.matches().size(), jobId);
 
-            log.info("🧠 Найдено фрагментов для контекста: {}", searchResult.matches().size());
-
-            // 4. Формируем системный промпт (Prompt Engineering)
-            String prompt = "Ты — умный AI-ассистент. Ответь на вопрос пользователя, опираясь ТОЛЬКО на предоставленный контекст из документа. " +
-                    "Если ответа в контексте нет, честно скажи об этом. Отвечай на языке запроса.\n\n" +
-                    "КОНТЕКСТ ДОКУМЕНТА:\n" + context + "\n\n" +
-                    "ВОПРОС ПОЛЬЗОВАТЕЛЯ:\n" + userQuestion;
-
-            // 5. Стримим ответ
-            chatModel.generate(prompt, new StreamingResponseHandler<AiMessage>() {
-                @Override
-                public void onNext(String token) {
-                    try { emitter.send(token); } catch (IOException e) { emitter.completeWithError(e); }
-                }
-                @Override
-                public void onComplete(Response<AiMessage> response) {
-                    emitter.complete();
-                }
-                @Override
-                public void onError(Throwable error) {
-                    emitter.completeWithError(error);
-                }
-            });
-
-        } catch (Exception e) {
-            log.error("RAG Error: {}", e.getMessage(), e);
-            emitter.completeWithError(e);
+        if (result.matches().isEmpty()) {
+            return "Контекст по данному документу не найден.";
         }
 
-        return emitter;
+        return result.matches().stream()
+                .map(match -> match.embedded().text())
+                .collect(Collectors.joining("\n\n---\n\n"));
     }
 }

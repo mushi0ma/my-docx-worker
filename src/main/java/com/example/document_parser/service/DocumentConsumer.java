@@ -6,13 +6,14 @@ import com.example.document_parser.dto.GenerateDocumentRequest;
 import com.example.document_parser.entity.DocumentEntity;
 import com.example.document_parser.model.JobStatus;
 import com.example.document_parser.repository.DocumentRepository;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.io.File;
 import java.io.IOException;
@@ -20,6 +21,7 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.regex.Pattern;
 
 @Service
 public class DocumentConsumer {
@@ -142,6 +144,7 @@ public class DocumentConsumer {
                 "/api/v1/documents/" + jobId + "/download");
     }
 
+    @Transactional
     private void processParseTask(String jobId, String originalName, DocumentEntity entity, Duration ttl) throws Exception {
         Path filePath = tempStorage.resolve(jobId + ".docx");
         if (!filePath.toFile().exists()) {
