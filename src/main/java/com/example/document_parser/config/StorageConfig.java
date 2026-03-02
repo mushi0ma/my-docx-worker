@@ -12,12 +12,10 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 
 /**
- * Централизованная конфигурация хранилища.
+ * Централизованная конфигурация путей хранилища.
  *
- * Исправления:
- * - Путь инициализируется один раз в @PostConstruct, а не при каждом вызове
- * - getTempStoragePath() теперь просто возвращает готовый Path — thread-safe
- * - Добавлено логирование успешной инициализации
+ * Оба пути (temp docs + images) управляются через Spring @Value,
+ * инициализируются один раз в @PostConstruct и доступны через геттеры.
  */
 @Configuration
 public class StorageConfig {
@@ -27,25 +25,38 @@ public class StorageConfig {
     @Value("${app.storage.temp-path}")
     private String tempPath;
 
-    // Вычисляется один раз при старте приложения
+    @Value("${app.storage.images-path}")
+    private String imagesPath;
+
     private Path resolvedTempPath;
+    private Path resolvedImagesPath;
 
     @PostConstruct
     public void init() {
-        resolvedTempPath = Paths.get(tempPath);
-        try {
-            Files.createDirectories(resolvedTempPath);
-            log.info("Temp storage initialized at: {}", resolvedTempPath.toAbsolutePath());
-        } catch (IOException e) {
-            throw new RuntimeException(
-                    "Не удалось создать директорию для временного хранения: " + resolvedTempPath, e);
-        }
+        resolvedTempPath = createDirectory(tempPath, "Temp docs");
+        resolvedImagesPath = createDirectory(imagesPath, "Images");
+        log.info("Storage initialized. tempDocs={}, images={}",
+                resolvedTempPath.toAbsolutePath(),
+                resolvedImagesPath.toAbsolutePath());
     }
 
-    /**
-     * Возвращает готовый Path. Thread-safe — поле задаётся один раз в @PostConstruct.
-     */
     public Path getTempStoragePath() {
         return resolvedTempPath;
+    }
+
+    public Path getImagesStoragePath() {
+        return resolvedImagesPath;
+    }
+
+    private Path createDirectory(String pathStr, String label) {
+        Path path = Paths.get(pathStr);
+        try {
+            Files.createDirectories(path);
+            log.debug("{} storage ready at: {}", label, path.toAbsolutePath());
+            return path;
+        } catch (IOException e) {
+            throw new RuntimeException(
+                    "Не удалось создать директорию [" + label + "]: " + path, e);
+        }
     }
 }

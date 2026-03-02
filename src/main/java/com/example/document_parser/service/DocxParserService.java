@@ -4,6 +4,7 @@ import com.example.document_parser.dto.DocumentMetadataResponse;
 import com.example.document_parser.dto.DocumentMetadataResponse.*;
 import org.apache.poi.ooxml.POIXMLProperties;
 import org.apache.poi.xwpf.usermodel.*;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTStyle;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -34,7 +35,7 @@ public class DocxParserService {
         List<DocumentBlock> blocks = new ArrayList<>();
 
         try (InputStream is = new FileInputStream(file);
-             XWPFDocument document = new XWPFDocument(is)) {
+                XWPFDocument document = new XWPFDocument(is)) {
 
             response.setStats(extractStats(document));
             response.setDocumentStyles(extractStyles(document));
@@ -63,7 +64,8 @@ public class DocxParserService {
         return response;
     }
 
-    private void parseElementsSafely(List<IBodyElement> elements, List<DocumentBlock> blocks, String jobId, String source) {
+    private void parseElementsSafely(List<IBodyElement> elements, List<DocumentBlock> blocks,
+            String jobId, String source) {
         for (IBodyElement element : elements) {
             try {
                 if (element instanceof XWPFParagraph paragraph) {
@@ -97,57 +99,182 @@ public class DocxParserService {
         return stats;
     }
 
+    /**
+     * Извлекает стили документа через CTStyles XML-бины.
+     *
+     * POI 5.3.0 не имеет XWPFStyles.getStyleList().
+     * Используем XWPFDocument.getStyle() → CTStyles.getStyleArray().
+     */
     private Map<String, StyleData> extractStyles(XWPFDocument document) {
         Map<String, StyleData> styleMap = new HashMap<>();
         try {
-            XWPFStyles styles = document.getStyles();
-            if (styles == null) return styleMap;
+            XWPFStyles xwpfStyles = document.getStyles();
+            if (xwpfStyles == null)
+                return styleMap;
 
-            java.lang.reflect.Field listField = XWPFStyles.class.getDeclaredField("listStyle");
-            listField.setAccessible(true);
-            @SuppressWarnings("unchecked")
-            List<XWPFStyle> styleList = (List<XWPFStyle>) listField.get(styles);
+            // Iterate known heading/paragraph style IDs
+            // POI 5.x approach: query individual styles by ID
+            String[] commonStyleIds = {
+                    "Normal", "Heading1", "Heading2", "Heading3", "Heading4",
+                    "Heading5", "Heading6", "Title", "Subtitle",
+                    "ListParagraph", "BodyText", "Quote", "IntenseQuote",
+                    "NoSpacing", "FootnoteText", "Header", "Footer"
+            };
 
-            if (styleList != null) {
-                for (XWPFStyle style : styleList) {
-                    StyleData ds = new StyleData();
-                    ds.setName(style.getName());
-                    ds.setBasedOn(style.getBasisStyleID());
-                    // ИСПРАВЛЕНИЕ: Заменили name() на toString()
-                    ds.setType(style.getType() != null ? style.getType().toString() : null);
-
-                    // Убрали глубокое чтение CTRPr, так как в новых версиях POI
-                    // методы getSz() и getColor() скрыты или возвращают разные типы
-                    styleMap.put(style.getStyleId(), ds);
+            for (String styleId : commonStyleIds) {
+                try {
+                    XWPFStyle style = xwpfStyles.getStyle(styleId);
+                    if (style != null) {
+                        StyleData ds = buildStyleDataFromXwpf(style);
+                        styleMap.put(styleId, ds);
+                    }
+                } catch (Exception e) {
+                    log.debug("Пропущен стиль {}: {}", styleId, e.getMessage());
                 }
             }
+
+            // Also try to extract all styles via the CTStyles XML bean
+            try {
+                org.openxmlformats.schemas.wordprocessingml.x2006.main.CTStyles ctStyles = document.getStyle();
+                if (ctStyles != null) {
+                    for (CTStyle ctStyle : ctStyles.getStyleArray()) {
+                        String styleId = ctStyle.getStyleId();
+                        if (styleId != null && !styleMap.containsKey(styleId)) {
+                            StyleData ds = buildStyleData(ctStyle);
+                            styleMap.put(styleId, ds);
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                log.debug("CTStyles extraction fallback failed: {}", e.getMessage());
+            }
+
         } catch (Exception e) {
             log.warn("Ошибка извлечения стилей: {}", e.getMessage());
         }
         return styleMap;
     }
 
+    private StyleData buildStyleDataFromXwpf(XWPFStyle style) {
+        StyleData ds = new StyleData();
+        ds.setName(style.getName());
+        ds.setBasedOn(style.getBasisStyleID());
+        ds.setType(style.getType() != null ? style.getType().toString() : null);
+
+        CTStyle ctStyle = style.getCTStyle();
+        if (ctStyle != null) {
+            populateStyleFromCt(ds, ctStyle);
+        }
+        return ds;
+    }
+
+    private StyleData buildStyleData(CTStyle ctStyle) {
+        StyleData ds = new StyleData();
+
+        if (ctStyle.isSetName()) {
+            ds.setName(ctStyle.getName().getVal());
+        }
+        if (ctStyle.isSetBasedOn()) {
+            ds.setBasedOn(ctStyle.getBasedOn().getVal());
+        }
+        if (ctStyle.getType() != null) {
+            ds.setType(ctStyle.getType().toString());
+        }
+
+        populateStyleFromCt(ds, ctStyle);
+        return ds;
+    }
+
+    private void populateStyleFromCt(StyleData ds, CTStyle ctStyle) {
+        // Run properties (font, size, color, bold, italic)
+        if (ctStyle.isSetRPr()) {
+            var rpr = ctStyle.getRPr();
+
+            if (rpr.sizeOfRFontsArray() > 0) {
+                var rFonts = rpr.getRFontsArray(0);
+                if (rFonts.getAscii() != null) {
+                    ds.setFontFamily(rFonts.getAscii());
+                }
+            }
+            if (rpr.sizeOfSzArray() > 0 && rpr.getSzArray(0).getVal() != null) {
+                ds.setFontSize(toDouble(rpr.getSzArray(0).getVal()) / 2.0);
+            }
+            if (rpr.sizeOfColorArray() > 0) {
+                Object val = rpr.getColorArray(0).getVal();
+                if (val != null) {
+                    ds.setColor(val.toString());
+                }
+            }
+            ds.setIsBold(rpr.sizeOfBArray() > 0);
+            ds.setIsItalic(rpr.sizeOfIArray() > 0);
+        }
+
+        // Paragraph properties (spacing, indentation)
+        if (ctStyle.isSetPPr()) {
+            var ppr = ctStyle.getPPr();
+
+            if (ppr.isSetSpacing()) {
+                var spacing = ppr.getSpacing();
+                if (spacing.getBefore() != null)
+                    ds.setSpacingBefore(toInt(spacing.getBefore()));
+                if (spacing.getAfter() != null)
+                    ds.setSpacingAfter(toInt(spacing.getAfter()));
+                if (spacing.getLine() != null) {
+                    ds.setLineSpacing(toDouble(spacing.getLine()) / 240.0);
+                }
+            }
+            if (ppr.isSetInd()) {
+                var ind = ppr.getInd();
+                if (ind.getFirstLine() != null)
+                    ds.setIndentFirstLine(toInt(ind.getFirstLine()));
+                if (ind.getLeft() != null)
+                    ds.setIndentLeft(toInt(ind.getLeft()));
+            }
+        }
+    }
+
+    /** Safe cast: XmlBeans returns Object for numeric values */
+    private static int toInt(Object val) {
+        if (val instanceof Number n)
+            return n.intValue();
+        return Integer.parseInt(val.toString());
+    }
+
+    private static double toDouble(Object val) {
+        if (val instanceof Number n)
+            return n.doubleValue();
+        return Double.parseDouble(val.toString());
+    }
+
     private PageLayoutData extractPageLayout(XWPFDocument document) {
         try {
             PageLayoutData layout = new PageLayoutData();
-            org.openxmlformats.schemas.wordprocessingml.x2006.main.CTSectPr sectPr = document.getDocument().getBody().getSectPr();
-            if (sectPr == null) return null;
+            var sectPr = document.getDocument().getBody().getSectPr();
+            if (sectPr == null)
+                return null;
 
-            // ИСПРАВЛЕНИЕ: Вернули твой оригинальный метод Double.parseDouble()
             if (sectPr.getPgSz() != null) {
-                if (sectPr.getPgSz().getW() != null) layout.setPageWidth(Double.parseDouble(sectPr.getPgSz().getW().toString()));
-                if (sectPr.getPgSz().getH() != null) layout.setPageHeight(Double.parseDouble(sectPr.getPgSz().getH().toString()));
-                if (sectPr.getPgSz().getOrient() != null) layout.setOrientation(sectPr.getPgSz().getOrient().toString());
+                if (sectPr.getPgSz().getW() != null)
+                    layout.setPageWidth(Double.parseDouble(sectPr.getPgSz().getW().toString()));
+                if (sectPr.getPgSz().getH() != null)
+                    layout.setPageHeight(Double.parseDouble(sectPr.getPgSz().getH().toString()));
+                if (sectPr.getPgSz().getOrient() != null)
+                    layout.setOrientation(sectPr.getPgSz().getOrient().toString());
             }
 
             if (sectPr.getPgMar() != null) {
-                if (sectPr.getPgMar().getTop() != null) layout.setMarginTop(Double.parseDouble(sectPr.getPgMar().getTop().toString()));
-                if (sectPr.getPgMar().getBottom() != null) layout.setMarginBottom(Double.parseDouble(sectPr.getPgMar().getBottom().toString()));
-                if (sectPr.getPgMar().getLeft() != null) layout.setMarginLeft(Double.parseDouble(sectPr.getPgMar().getLeft().toString()));
-                if (sectPr.getPgMar().getRight() != null) layout.setMarginRight(Double.parseDouble(sectPr.getPgMar().getRight().toString()));
+                if (sectPr.getPgMar().getTop() != null)
+                    layout.setMarginTop(Double.parseDouble(sectPr.getPgMar().getTop().toString()));
+                if (sectPr.getPgMar().getBottom() != null)
+                    layout.setMarginBottom(Double.parseDouble(sectPr.getPgMar().getBottom().toString()));
+                if (sectPr.getPgMar().getLeft() != null)
+                    layout.setMarginLeft(Double.parseDouble(sectPr.getPgMar().getLeft().toString()));
+                if (sectPr.getPgMar().getRight() != null)
+                    layout.setMarginRight(Double.parseDouble(sectPr.getPgMar().getRight().toString()));
             }
             return layout;
         } catch (Exception e) {
+            log.warn("Не удалось извлечь page layout: {}", e.getMessage());
             return null;
         }
     }

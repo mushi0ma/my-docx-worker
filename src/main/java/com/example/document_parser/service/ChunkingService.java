@@ -7,15 +7,21 @@ import dev.langchain4j.data.document.splitter.DocumentSplitters;
 import dev.langchain4j.data.segment.TextSegment;
 import org.springframework.stereotype.Service;
 
+import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
 
+/**
+ * ИСПРАВЛЕНО: при пустом или null contentBlocks возвращаем пустой список
+ * вместо того чтобы бросать IllegalArgumentException из Document.from("").
+ * Это позволяет VectorizationService просто залогировать предупреждение
+ * и продолжить работу, не роняя RabbitMQ-поток.
+ */
 @Service
 public class ChunkingService {
 
     private final MarkdownService markdownService;
 
-    // Default configuration for chunking based on characters
     private static final int MAX_CHARS_PER_CHUNK = 2000;
     private static final int MAX_OVERLAP_CHARS = 300;
 
@@ -23,18 +29,16 @@ public class ChunkingService {
         this.markdownService = markdownService;
     }
 
-    /**
-     * Конвертирует документ в Markdown и производит "умное" чанкирование.
-     * DocumentSplitters.recursive в Langchain4j отлично работает с Markdown,
-     * стараясь резать по заголовкам (##, ###), параграфам и предложениям.
-     */
     public List<String> chunkDocument(DocumentMetadataResponse metadata) {
         String markdownContent = markdownService.toMarkdown(metadata);
 
+        // Защита: пустой документ → пустой список вместо исключения
+        if (markdownContent == null || markdownContent.isBlank()) {
+            return Collections.emptyList();
+        }
+
         Document document = Document.from(markdownContent);
-
         DocumentSplitter splitter = DocumentSplitters.recursive(MAX_CHARS_PER_CHUNK, MAX_OVERLAP_CHARS);
-
         List<TextSegment> segments = splitter.split(document);
 
         return segments.stream()
