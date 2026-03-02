@@ -12,6 +12,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import dev.langchain4j.model.chat.StreamingChatLanguageModel;
+import dev.langchain4j.model.openai.OpenAiStreamingChatModel;
+import dev.langchain4j.model.embedding.onnx.allminilml6v2.AllMiniLmL6V2EmbeddingModel;
 
 import java.time.Duration;
 
@@ -37,7 +40,6 @@ public class LangChainConfig {
 
     @Bean
     public EmbeddingStore<TextSegment> embeddingStore() {
-        // ТВОЙ КОД ОСТАЕТСЯ БЕЗ ИЗМЕНЕНИЙ (он написан отлично)
         try {
             String urlWithoutJdbc = dbUrl.replace("jdbc:postgresql://", "");
             String[] parts = urlWithoutJdbc.split("/");
@@ -51,24 +53,23 @@ public class LangChainConfig {
 
             return PgVectorEmbeddingStore.builder()
                     .host(host).port(port).database(database).user(dbUser).password(dbPassword)
-                    .table("document_embeddings").dimension(768).createTable(true).dropTableFirst(false).build();
+                    // ИЗМЕНЕНО: Новая таблица и новая размерность (384) для локальной модели
+                    .table("doc_embeddings_local")
+                    .dimension(384)
+                    .createTable(true)
+                    .dropTableFirst(false)
+                    .build();
         } catch (Exception e) {
             return PgVectorEmbeddingStore.builder()
                     .host("localhost").port(5432).database("postgres").user(dbUser).password(dbPassword)
-                    .table("document_embeddings").dimension(768).createTable(true).dropTableFirst(false).build();
+                    .table("doc_embeddings_local").dimension(384).createTable(true).dropTableFirst(false).build();
         }
     }
 
     @Bean
     public EmbeddingModel embeddingModel() {
-        return OpenAiEmbeddingModel.builder()
-                .baseUrl("https://openrouter.ai/api/v1")
-                .apiKey(openRouterApiKey)
-                .modelName("nomic-ai/nomic-embed-text-v1.5")
-                .build();
+        return new AllMiniLmL6V2EmbeddingModel();
     }
-
-    // --- ИЗМЕНЕНИЯ ЗДЕСЬ: ДВА ОТДЕЛЬНЫХ БИНА ---
 
     // 1. Агент-Корректор (Тяжелая модель Qwen Coder для исправления JSON и кода)
     @Bean("coderModel")
@@ -89,6 +90,29 @@ public class LangChainConfig {
                 .apiKey(groqApiKey)
                 .modelName("llama-3.3-70b-versatile")
                 .timeout(Duration.ofSeconds(15))
+                .build();
+    }
+
+    // 3. СТРИМИНГ: Агент-Диспетчер (Groq) для быстрой генерации Summary на лету
+    @Bean("streamingRouterModel")
+    public StreamingChatLanguageModel streamingRouterModel() {
+        return OpenAiStreamingChatModel.builder()
+                .baseUrl("https://api.groq.com/openai/v1")
+                .apiKey(groqApiKey)
+                .modelName("llama-3.3-70b-versatile")
+                .timeout(Duration.ofSeconds(15))
+                .build();
+    }
+
+    // 4. СТРИМИНГ: Агент-Аналитик (OpenRouter) для RAG и сложных ответов в чате
+    @Bean("streamingChatModel")
+    public StreamingChatLanguageModel streamingChatModel() {
+        return OpenAiStreamingChatModel.builder()
+                .baseUrl("https://openrouter.ai/api/v1")
+                .apiKey(openRouterApiKey)
+                // Можешь использовать Qwen или Gemini-2.0-flash
+                .modelName("arcee-ai/trinity-large-preview:free")
+                .timeout(Duration.ofSeconds(60))
                 .build();
     }
 }

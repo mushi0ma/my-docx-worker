@@ -107,6 +107,8 @@ public class DocumentConsumer {
             throw new RuntimeException("Missing GenerateDocumentRequest input JSON in Redis");
         }
 
+        redisTemplate.delete("job:" + jobId + ":generate_input");
+
         GenerateDocumentRequest request = objectMapper.readValue(inputJson, GenerateDocumentRequest.class);
 
         entity.updateProgress(50, JobStatus.PROCESSING);
@@ -127,11 +129,14 @@ public class DocumentConsumer {
             generatedFile = generatorService.generateDocument(request.getMetadata(), jobId, null);
         }
 
+        Path targetPath = tempStorage.resolve(jobId + ".docx");
+        java.nio.file.Files.copy(generatedFile.toPath(), targetPath, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        generatedFile.delete();
+
         entity.updateProgress(100, JobStatus.SUCCESS);
         documentRepository.save(entity);
 
-        // ИСПРАВЛЕНО 2: Используем переменную generatedFile для логов
-        log.info("✅ [{}] Генерация завершена. Файл сохранен: {}", jobId, generatedFile.getAbsolutePath());
+        log.info("✅ [{}] Генерация завершена. Файл сохранен: {}", jobId, targetPath.toAbsolutePath());
 
         webhookService.sendWebhook(entity.getWebhookUrl(), jobId, "SUCCESS", "Generation complete",
                 "/api/v1/documents/" + jobId + "/download");

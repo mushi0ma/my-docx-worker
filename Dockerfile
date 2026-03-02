@@ -19,18 +19,15 @@ RUN ./mvnw package -DskipTests -q
 # =============================================
 # ЭТАП 2: Runtime (финальный образ)
 # =============================================
-FROM eclipse-temurin:21-jre-alpine
+FROM eclipse-temurin:21-jre-jammy
 
 WORKDIR /app
 
-# Создаём непривилегированного пользователя — не запускаем приложение от root
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+# Создаём непривилегированного пользователя (синтаксис для Ubuntu/Debian)
+RUN groupadd -r appgroup && useradd -r -g appgroup appuser
 
-# Создаём директорию для временных файлов и даём права нашему пользователю
-# ПРИМЕЧАНИЕ: в docker-compose.yml нужно смонтировать volume сюда:
-#   volumes:
-#     - temp_docs_volume:/app/temp_docs
-RUN mkdir -p /app/temp_docs && chown appuser:appgroup /app/temp_docs
+# Создаём директории для временных файлов и картинок, даём права нашему пользователю
+RUN mkdir -p /app/temp_docs /app/images && chown -R appuser:appgroup /app
 
 # Копируем JAR из builder-этапа
 COPY --from=builder /app/target/*.jar app.jar

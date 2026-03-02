@@ -28,14 +28,15 @@ public class SelfCorrectionService {
         this.corrector = AiServices.create(DocumentCorrector.class, chatLanguageModel);
     }
 
+    // ИСПРАВЛЕНИЕ: Переносим текст задания в @SystemMessage, а JSON передаем напрямую через @UserMessage в параметре
     interface DocumentValidator {
-        @SystemMessage("You are an expert at validating JSON representations of documents. Your task is to check if the JSON has missing text, broken tables, or obvious OCR errors. Return true if IT IS VALID AND CLEAN. Return false if it is DIRTY, broken, or needs correction. You must reply strictly with a boolean: 'true' or 'false'.")
-        boolean isValid(@UserMessage String jsonDocument);
+        @SystemMessage("You are an expert at validating JSON representations of documents. Your task is to check if the JSON has missing text, broken tables, or obvious OCR errors. Return true if IT IS VALID AND CLEAN. Return false if it is DIRTY, broken, or needs correction. You must reply strictly with a boolean: 'true' or 'false'. Here is the JSON to validate:")
+        boolean isValid(@dev.langchain4j.service.UserMessage String json);
     }
 
     interface DocumentCorrector {
-        @SystemMessage("You are an expert document reconstruction AI. The provided JSON has structural or OCR errors. Rewrite the JSON structure to fix broken tables, fix missing spaces, and ensure proper semantic levels. Return ONLY the rebuilt valid JSON adhering to the exact same schema.")
-        String correctDocument(@UserMessage String jsonDocument);
+        @SystemMessage("You are a data cleaning expert. Your task is to fix broken JSON representations of parsed documents. Fix missing text, broken table structures, and bad formatting. Do NOT alter the schema. Reply ONLY with the valid JSON without markdown formatting. Here is the dirty JSON:")
+        String correctDocument(@dev.langchain4j.service.UserMessage String json);
     }
 
     public DocumentMetadataResponse validateAndCorrect(DocumentMetadataResponse parsedDocument) {

@@ -1,5 +1,6 @@
 package com.example.document_parser.controller;
 
+import lombok.Data;
 import com.example.document_parser.config.StorageConfig;
 import com.example.document_parser.dto.DocumentMetadataResponse;
 import com.example.document_parser.dto.GenerateDocumentRequest;
@@ -8,10 +9,7 @@ import com.example.document_parser.exception.AppExceptions;
 import com.example.document_parser.export.DocumentExporter;
 import com.example.document_parser.model.JobStatus;
 import com.example.document_parser.repository.DocumentRepository;
-import com.example.document_parser.service.AiDocumentService;
-import com.example.document_parser.service.DocumentProducer;
-import com.example.document_parser.service.DocxGeneratorService;
-import com.example.document_parser.service.MarkdownService;
+import com.example.document_parser.service.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -22,6 +20,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
 import java.io.IOException;
@@ -52,6 +51,7 @@ public class DocumentController {
     private final Map<String, DocumentExporter> exporters;
     private final AiDocumentService aiDocumentService;
     private final MarkdownService markdownService;
+    private final RagChatService ragChatService;
 
     // ИСПРАВЛЕНИЕ 1: Добавили DocxGeneratorService в параметры конструктора
     public DocumentController(DocumentProducer documentProducer,
@@ -62,15 +62,17 @@ public class DocumentController {
                               List<DocumentExporter> exporterList,
                               DocxGeneratorService docxGeneratorService,
                               AiDocumentService aiDocumentService,
-                              MarkdownService markdownService) {
+                              MarkdownService markdownService,
+                              RagChatService ragChatService) {
         this.documentProducer = documentProducer;
         this.redisTemplate = redisTemplate;
         this.documentRepository = documentRepository;
         this.tempStorage = storageConfig.getTempStoragePath();
         this.objectMapper = objectMapper;
-        this.docxGeneratorService = docxGeneratorService; // Инициализация
+        this.docxGeneratorService = docxGeneratorService;
         this.aiDocumentService = aiDocumentService;
         this.markdownService = markdownService;
+        this.ragChatService = ragChatService;
         this.exporters = exporterList.stream()
                 .collect(Collectors.toMap(DocumentExporter::format, Function.identity()));
     }
@@ -193,7 +195,8 @@ public class DocumentController {
         try {
             java.io.File generatedFile = docxGeneratorService.generateDocument(response, jobId);
             byte[] bytes = Files.readAllBytes(generatedFile.toPath());
-            generatedFile.delete();
+
+            Files.deleteIfExists(generatedFile.toPath());
 
             return ResponseEntity.ok()
                     .header(HttpHeaders.CONTENT_DISPOSITION,
@@ -234,6 +237,30 @@ public class DocumentController {
         } catch (Exception e) {
             throw new RuntimeException("Ошибка при вызове ИИ: " + e.getMessage(), e);
         }
+    }
+
+    @Operation(summary = "Получить интеллектуальную выжимку (Streaming)")
+    @GetMapping(value = "/{jobId}/ai/summary/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter getAiSummaryStream(@PathVariable String jobId) {
+        String resultJson = fetchResultString(jobId);
+        try {
+            DocumentMetadataResponse doc = objectMapper.readValue(resultJson, DocumentMetadataResponse.class);
+            String markdown = markdownService.toMarkdown(doc);
+            return aiDocumentService.generateSummaryStream(markdown);
+        } catch (Exception e) {
+            throw new RuntimeException("Ошибка при вызове ИИ: " + e.getMessage(), e);
+        }
+    }
+
+    // 2. RAG CHAT (Диалог с документом)
+    @Operation(summary = "Задать вопрос по документу (Streaming RAG)")
+    @PostMapping(value = "/{jobId}/chat", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter chatWithDocument(@PathVariable String jobId, @RequestBody ChatRequest request) {
+        validateJobId(jobId);
+        if (request.getQuestion() == null || request.getQuestion().isBlank()) {
+            throw new IllegalArgumentException("Вопрос не может быть пустым");
+        }
+        return ragChatService.chatWithDocument(jobId, request.getQuestion());
     }
 
     // Вспомогательные методы
@@ -290,5 +317,10 @@ public class DocumentController {
         if (lower.endsWith(".webp"))
             return MediaType.parseMediaType("image/webp");
         return MediaType.APPLICATION_OCTET_STREAM;
+    }
+
+    @Data
+    public static class ChatRequest {
+        private String question;
     }
 }

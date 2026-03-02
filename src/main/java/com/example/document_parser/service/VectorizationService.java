@@ -7,6 +7,7 @@ import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.store.embedding.EmbeddingStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -29,6 +30,7 @@ public class VectorizationService {
         this.chunkingService = chunkingService;
     }
 
+    @Async
     public void vectorizeAndStore(com.example.document_parser.dto.DocumentMetadataResponse metadata, String jobId) {
         log.info("Starting vectorization for job {}", jobId);
 
