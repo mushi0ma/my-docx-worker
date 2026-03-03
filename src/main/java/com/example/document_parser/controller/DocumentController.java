@@ -1,5 +1,6 @@
 package com.example.document_parser.controller;
 
+import com.example.document_parser.service.ai.DocumentAgentService;
 import lombok.Data;
 import com.example.document_parser.config.StorageConfig;
 import com.example.document_parser.dto.DocumentMetadataResponse;
@@ -10,7 +11,7 @@ import com.example.document_parser.export.DocumentExporter;
 import com.example.document_parser.model.JobStatus;
 import com.example.document_parser.repository.DocumentRepository;
 import com.example.document_parser.service.*;
-import tools.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -47,12 +48,13 @@ public class DocumentController {
     private final StringRedisTemplate redisTemplate;
     private final DocumentRepository documentRepository;
     private final ObjectMapper objectMapper;
-    private final DocxGeneratorService docxGeneratorService; // Теперь инициализируется!
+    private final DocxGeneratorService docxGeneratorService;
     private final Path tempStorage;
     private final Map<String, DocumentExporter> exporters;
-    private final AiDocumentService aiDocumentService;
+    private final DocumentSummaryService documentSummaryService;
     private final MarkdownService markdownService;
     private final RagChatService ragChatService;
+    private final DocumentDraftingAgent documentDraftingAgent;
     private final DocumentAgentService documentAgentService;
     private static final Pattern UUID_PATTERN = Pattern
             .compile("^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$");
@@ -65,9 +67,10 @@ public class DocumentController {
             ObjectMapper objectMapper,
             List<DocumentExporter> exporterList,
             DocxGeneratorService docxGeneratorService,
-            AiDocumentService aiDocumentService,
+            DocumentSummaryService documentSummaryService,
             MarkdownService markdownService,
             RagChatService ragChatService,
+            DocumentDraftingAgent documentDraftingAgent,
             DocumentAgentService documentAgentService) {
         this.documentProducer = documentProducer;
         this.redisTemplate = redisTemplate;
@@ -75,9 +78,10 @@ public class DocumentController {
         this.tempStorage = storageConfig.getTempStoragePath();
         this.objectMapper = objectMapper;
         this.docxGeneratorService = docxGeneratorService;
-        this.aiDocumentService = aiDocumentService;
+        this.documentSummaryService = documentSummaryService;
         this.markdownService = markdownService;
         this.ragChatService = ragChatService;
+        this.documentDraftingAgent = documentDraftingAgent;
         this.documentAgentService = documentAgentService;
         this.exporters = exporterList.stream()
                 .collect(Collectors.toMap(DocumentExporter::format, Function.identity()));
@@ -239,7 +243,7 @@ public class DocumentController {
         try {
             DocumentMetadataResponse doc = objectMapper.readValue(resultJson, DocumentMetadataResponse.class);
             String markdown = markdownService.toMarkdown(doc);
-            String aiResponse = aiDocumentService.generateSummary(markdown);
+            String aiResponse = documentSummaryService.generateSummary(markdown);
             return ResponseEntity.ok(aiResponse);
         } catch (Exception e) {
             throw new RuntimeException("Ошибка при вызове ИИ: " + e.getMessage(), e);
@@ -253,7 +257,7 @@ public class DocumentController {
         try {
             DocumentMetadataResponse doc = objectMapper.readValue(resultJson, DocumentMetadataResponse.class);
             String markdown = markdownService.toMarkdown(doc);
-            return aiDocumentService.generateSummaryStream(markdown);
+            return documentSummaryService.generateSummaryStream(markdown);
         } catch (Exception e) {
             throw new RuntimeException("Ошибка при вызове ИИ: " + e.getMessage(), e);
         }
@@ -363,5 +367,30 @@ public class DocumentController {
             throw new IllegalArgumentException("Instruction cannot be empty");
         }
         return documentAgentService.executeAgentStream(jobId, request.getInstruction());
+    }
+
+    @Operation(summary = "Generate a completely new DOCX using AI")
+    @PostMapping(value = "/generate-ai", consumes = { MediaType.APPLICATION_FORM_URLENCODED_VALUE,
+            MediaType.MULTIPART_FORM_DATA_VALUE })
+    public ResponseEntity<?> generateDocumentByAi(@RequestParam String prompt) {
+        String jobId = UUID.randomUUID().toString();
+        try {
+            java.io.File generatedFile = documentDraftingAgent.draftNewDocument(prompt, jobId);
+            org.springframework.core.io.Resource resource = new org.springframework.core.io.FileSystemResource(
+                    generatedFile);
+
+            return ResponseEntity.ok()
+                    .contentType(MediaType.parseMediaType(
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"))
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"AI_Generated.docx\"")
+                    .body(resource);
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(Map.of(
+                            "error", "AI document generation failed",
+                            "message", e.getMessage() != null ? e.getMessage() : "Unknown error",
+                            "jobId", jobId));
+        }
     }
 }

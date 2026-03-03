@@ -3,7 +3,7 @@ package com.example.document_parser.export;
 import com.example.document_parser.dto.DocumentMetadataResponse;
 import com.example.document_parser.dto.DocumentMetadataResponse.*;
 import org.springframework.stereotype.Component;
-import tools.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.IOException;
 import java.io.Writer;

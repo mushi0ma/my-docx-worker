@@ -81,19 +81,6 @@
             <version>${poi.version}</version>
         </dependency>
 
-        <!-- ===== SERIALIZATION ===== -->
-        <dependency>
-            <groupId>tools.jackson.core</groupId>
-            <artifactId>jackson-databind</artifactId>
-            <version>3.0.0-rc1</version>
-        </dependency>
-        <!-- Нужен для корректной сериализации LocalDateTime -->
-        <dependency>
-            <groupId>tools.jackson.datatype</groupId>
-            <artifactId>jackson-datatype-jsr310</artifactId>
-            <version>3.0.0-rc1</version>
-        </dependency>
-
         <!-- ===== UTILITIES ===== -->
         <dependency>
             <groupId>org.projectlombok</groupId>
@@ -124,6 +111,11 @@
             <groupId>dev.langchain4j</groupId>
             <artifactId>langchain4j-pgvector</artifactId>
             <version>${langchain4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-google-ai-gemini</artifactId>
+            <version>0.36.0</version>
         </dependency>
         <!-- Локальная embedding-модель (не требует API) -->
         <dependency>

@@ -1,16 +1,19 @@
 package com.example.document_parser.config;
 
+import dev.langchain4j.service.AiServices;
 import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.model.chat.ChatLanguageModel;
 import dev.langchain4j.model.chat.StreamingChatLanguageModel;
 import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.model.embedding.onnx.allminilml6v2.AllMiniLmL6V2EmbeddingModel;
+import dev.langchain4j.model.googleai.GoogleAiGeminiChatModel;
 import dev.langchain4j.model.openai.OpenAiChatModel;
 import dev.langchain4j.model.openai.OpenAiStreamingChatModel;
 import dev.langchain4j.store.embedding.EmbeddingStore;
 import dev.langchain4j.store.embedding.pgvector.PgVectorEmbeddingStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -21,14 +24,14 @@ import java.time.Duration;
  * Конфигурация AI-моделей.
  *
  * ┌──────────────────────────────────────────────────────────────────────┐
- * │  ЗАДАЧА               │  МОДЕЛЬ                      │  ПРОВАЙДЕР   │
+ * │ ЗАДАЧА │ МОДЕЛЬ │ ПРОВАЙДЕР │
  * ├──────────────────────────────────────────────────────────────────────┤
- * │  Summary (sync)       │  llama-4-scout-17b-16e       │  Groq        │
- * │  Summary (stream)     │  llama-4-scout-17b-16e       │  Groq        │
- * │  RAG-чат (основная)   │  qwen3-next-80b-a3b:free     │  OpenRouter  │
- * │  RAG-чат (fallback)   │  openrouter/free             │  OpenRouter  │
- * │  JSON-коррекция       │  qwen3-coder 480B:free       │  OpenRouter  │
- * │  Embeddings           │  all-minilm-l6-v2 (local)   │  локально    │
+ * │ Summary (sync) │ llama-4-scout-17b-16e │ Groq │
+ * │ Summary (stream) │ llama-4-scout-17b-16e │ Groq │
+ * │ RAG-чат (основная) │ qwen3-next-80b-a3b:free │ OpenRouter │
+ * │ RAG-чат (fallback) │ openrouter/free │ OpenRouter │
+ * │ JSON-коррекция │ qwen3-coder 480B:free │ OpenRouter │
+ * │ Embeddings │ all-minilm-l6-v2 (local) │ локально │
  * └──────────────────────────────────────────────────────────────────────┘
  *
  * Почему нужен fallback:
@@ -98,8 +101,7 @@ public class LangChainConfig {
                 "https://api.groq.com/openai/v1",
                 groqApiKey,
                 "meta-llama/llama-4-scout-17b-16e-instruct",
-                groqTimeoutSeconds
-        );
+                groqTimeoutSeconds);
     }
 
     @Bean("streamingSummaryModel")
@@ -108,8 +110,7 @@ public class LangChainConfig {
                 "https://api.groq.com/openai/v1",
                 groqApiKey,
                 "meta-llama/llama-4-scout-17b-16e-instruct",
-                groqTimeoutSeconds
-        );
+                groqTimeoutSeconds);
     }
 
     // =================================================================
@@ -126,9 +127,20 @@ public class LangChainConfig {
         return buildStreamingModel(
                 "https://openrouter.ai/api/v1",
                 openRouterApiKey,
-                "qwen/qwen3-next-80b-a3b-instruct:free",
-                openRouterTimeoutSeconds
-        );
+                "openrouter/free",
+                openRouterTimeoutSeconds);
+    }
+
+    /**
+     * Синхронная основная модель для агента (выполнение разовых поручений)
+     */
+    @Bean("chatModel")
+    public ChatLanguageModel chatModel() {
+        return buildChatModel(
+                "https://openrouter.ai/api/v1",
+                openRouterApiKey,
+                "openrouter/free",
+                openRouterTimeoutSeconds);
     }
 
     /**
@@ -142,8 +154,7 @@ public class LangChainConfig {
                 "https://openrouter.ai/api/v1",
                 openRouterApiKey,
                 "openrouter/free",
-                openRouterTimeoutSeconds
-        );
+                openRouterTimeoutSeconds);
     }
 
     // =================================================================
@@ -156,8 +167,43 @@ public class LangChainConfig {
                 "https://openrouter.ai/api/v1",
                 openRouterApiKey,
                 "qwen/qwen3-coder:free",
-                openRouterTimeoutSeconds
-        );
+                openRouterTimeoutSeconds);
+    }
+
+    @Bean("advancedModel")
+    public ChatLanguageModel advancedModel(@Value("${google.gemini.api-key:}") String geminiApiKey) {
+
+        // Защита от падения при старте, если ключ еще не прописан
+        if (geminiApiKey == null || geminiApiKey.isBlank() || geminiApiKey.equals("твой_ключ_от_google_ai_studio")) {
+            log.warn("⚠️ Ключ Google Gemini API не задан. Бин 'advancedModel' пока недоступен.");
+            return null;
+        }
+
+        log.info("Успешно подключена модель Gemini 3.0 flash (Google AI Studio)");
+
+        return GoogleAiGeminiChatModel.builder()
+                .apiKey(geminiApiKey)
+                .modelName("gemini-3.0-flash-preview")
+                .temperature(0.4)
+                .maxOutputTokens(8192)
+                .build();
+    }
+
+    /**
+     * LangChain4j AI Service для генерации структурированных документов.
+     * Автоматически парсит ответ LLM в List<DocumentBlock>.
+     * Возвращает null если advancedModel не доступен.
+     */
+    @Bean
+    public com.example.document_parser.service.ai.DocumentDraftingAiService documentDraftingAiService(
+            @Qualifier("advancedModel") ChatLanguageModel advancedModel) {
+        if (advancedModel == null) {
+            log.warn("⚠️ DocumentDraftingAiService disabled — advancedModel is null");
+            return null;
+        }
+        return AiServices.builder(com.example.document_parser.service.ai.DocumentDraftingAiService.class)
+                .chatLanguageModel(advancedModel)
+                .build();
     }
 
     // =================================================================
@@ -165,7 +211,7 @@ public class LangChainConfig {
     // =================================================================
 
     private ChatLanguageModel buildChatModel(String baseUrl, String apiKey,
-                                             String modelName, int timeoutSeconds) {
+            String modelName, int timeoutSeconds) {
         return OpenAiChatModel.builder()
                 .baseUrl(baseUrl)
                 .apiKey(apiKey)
@@ -175,7 +221,7 @@ public class LangChainConfig {
     }
 
     private StreamingChatLanguageModel buildStreamingModel(String baseUrl, String apiKey,
-                                                           String modelName, int timeoutSeconds) {
+            String modelName, int timeoutSeconds) {
         return OpenAiStreamingChatModel.builder()
                 .baseUrl(baseUrl)
                 .apiKey(apiKey)
@@ -200,5 +246,6 @@ public class LangChainConfig {
         }
     }
 
-    private record DbCoordinates(String host, int port, String database) {}
+    private record DbCoordinates(String host, int port, String database) {
+    }
 }

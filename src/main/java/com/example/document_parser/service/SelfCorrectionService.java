@@ -2,7 +2,7 @@ package com.example.document_parser.service;
 
 import com.example.document_parser.dto.DocumentMetadataResponse;
 import com.example.document_parser.service.ai.AiPrompts;
-import tools.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.langchain4j.model.chat.ChatLanguageModel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -120,7 +120,7 @@ public class SelfCorrectionService {
                         fullJson.length(), doc.getFileName());
                 return correctBlockByBlock(doc);
             }
-        } catch (tools.jackson.core.JacksonException e) {
+        } catch (com.fasterxml.jackson.core.JacksonException e) {
             log.error("JSON serialization failed during correction. file={}, error={}",
                     doc.getFileName(), e.getMessage());
             return doc;
@@ -188,7 +188,7 @@ public class SelfCorrectionService {
             String blockJson = objectMapper.writeValueAsString(block);
             String fixed = stripMarkdownFences(correctorModel.generate(AiPrompts.correctSingleBlock(blockJson)));
             return objectMapper.readValue(fixed, DocumentMetadataResponse.DocumentBlock.class);
-        } catch (tools.jackson.core.JacksonException e) {
+        } catch (com.fasterxml.jackson.core.JacksonException e) {
             log.warn("Failed to parse corrected JSON for block type={}, keeping original. error={}",
                     block.getType(), e.getMessage());
             return block;

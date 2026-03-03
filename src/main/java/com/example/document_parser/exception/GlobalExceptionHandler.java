@@ -63,8 +63,8 @@ public class GlobalExceptionHandler {
                 "Internal server error", "internal-error");
     }
 
-    @ExceptionHandler(tools.jackson.core.JacksonException.class)
-    public ProblemDetail handleJacksonException(tools.jackson.core.JacksonException ex) {
+    @ExceptionHandler(com.fasterxml.jackson.core.JacksonException.class)
+    public ProblemDetail handleJacksonException(com.fasterxml.jackson.core.JacksonException ex) {
         log.error("JSON processing error: {}", ex.getMessage());
         return problem(HttpStatus.BAD_REQUEST,
                 "Invalid JSON: " + ex.getOriginalMessage(), "json-error");

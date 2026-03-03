@@ -18,9 +18,9 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
  * Модель: Llama 4 Scout (Groq) — >460 токенов/сек, MoE 17B/109B.
  */
 @Service
-public class AiDocumentService {
+public class DocumentSummaryService {
 
-    private static final Logger log = LoggerFactory.getLogger(AiDocumentService.class);
+    private static final Logger log = LoggerFactory.getLogger(DocumentSummaryService.class);
 
     @Value("${app.ai.summary.max-chars:25000}")
     private int summaryMaxChars;
@@ -29,7 +29,7 @@ public class AiDocumentService {
     private final ChatLanguageModel summaryModel;
     private final SseEmitterFactory sseEmitterFactory;
 
-    public AiDocumentService(
+    public DocumentSummaryService(
             @Qualifier("streamingSummaryModel") StreamingChatLanguageModel streamingSummaryModel,
             @Qualifier("summaryModel") ChatLanguageModel summaryModel,
             SseEmitterFactory sseEmitterFactory) {

@@ -8,8 +8,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import tools.jackson.databind.ObjectMapper;
-import tools.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -31,6 +32,11 @@ class SelfCorrectionServiceTest {
     void setUp() {
         objectMapper = JsonMapper.builder().build();
         service = new SelfCorrectionService(correctorModel, objectMapper);
+
+        // Вручную задаем переменные из @Value для корректной работы теста
+        ReflectionTestUtils.setField(service, "maxJsonCharsForFullCorrection", 15000);
+        ReflectionTestUtils.setField(service, "maxEmptyBlockRatio", 0.6);
+        ReflectionTestUtils.setField(service, "maxBlockCorrections", 50);
     }
 
     @Test
@@ -50,9 +56,6 @@ class SelfCorrectionServiceTest {
                 .contentBlocks(null)
                 .build();
 
-        // With null blocks the structural validator finds "no_content_blocks"
-        // which triggers LLM correction, but the doc is still returned even if LLM
-        // fails
         DocumentMetadataResponse result = service.validateAndCorrect(doc);
 
         assertNotNull(result);
@@ -65,7 +68,6 @@ class SelfCorrectionServiceTest {
                 .contentBlocks(List.of())
                 .build();
 
-        // Empty list returns "no_content_blocks" issue
         DocumentMetadataResponse result = service.validateAndCorrect(doc);
 
         assertNotNull(result);
@@ -122,7 +124,6 @@ class SelfCorrectionServiceTest {
 
     @Test
     void validateAndCorrect_highEmptyRatio_triggersCorrection() {
-        // Create a document where >60% of text blocks are empty
         List<DocumentBlock> blocks = new ArrayList<>();
         blocks.add(DocumentBlock.builder().type("PARAGRAPH").text("Content").build());
         for (int i = 0; i < 9; i++) {
@@ -134,12 +135,10 @@ class SelfCorrectionServiceTest {
                 .contentBlocks(blocks)
                 .build();
 
-        // When LLM is called, simulate it returns valid JSON
         when(correctorModel.generate(anyString())).thenReturn("{}");
 
         DocumentMetadataResponse result = service.validateAndCorrect(doc);
 
-        // LLM should have been called since empty ratio is 90%
         verify(correctorModel, atLeastOnce()).generate(anyString());
         assertNotNull(result);
     }

@@ -4,8 +4,8 @@ import com.example.document_parser.dto.DocumentMetadataResponse;
 import com.example.document_parser.dto.DocumentMetadataResponse.*;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import tools.jackson.databind.ObjectMapper;
-import tools.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 
 import java.io.IOException;
 import java.io.StringWriter;

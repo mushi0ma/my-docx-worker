@@ -35,8 +35,8 @@ public class VectorizationService {
     private final ChunkingService chunkingService;
 
     public VectorizationService(EmbeddingModel embeddingModel,
-                                EmbeddingStore<TextSegment> embeddingStore,
-                                ChunkingService chunkingService) {
+            EmbeddingStore<TextSegment> embeddingStore,
+            ChunkingService chunkingService) {
         this.embeddingModel = embeddingModel;
         this.embeddingStore = embeddingStore;
         this.chunkingService = chunkingService;
@@ -65,8 +65,7 @@ public class VectorizationService {
                     Metadata.from("jobId", jobId)
                             .put("fileName", fileName)
                             .put("chunkIndex", String.valueOf(i))
-                            .put("totalChunks", String.valueOf(textChunks.size()))
-            ));
+                            .put("totalChunks", String.valueOf(textChunks.size()))));
         }
 
         try {
@@ -76,7 +75,7 @@ public class VectorizationService {
                 List<TextSegment> batch = segments.subList(i, end);
 
                 List<Embedding> embeddings = embeddingModel.embedAll(batch).content();
-                embeddingStore.addAll(embeddings, batch);
+                addWithRetry(embeddings, batch, jobId);
 
                 totalStored += embeddings.size();
                 log.debug("Vectorized batch {}/{}. jobId={}", end, segments.size(), jobId);
@@ -101,6 +100,53 @@ public class VectorizationService {
         } catch (Exception e) {
             log.warn("Could not check indexing status, will re-index. jobId={}", jobId);
             return false;
+        }
+    }
+
+    /**
+     * Retry wrapper for PgVector batch insert.
+     * PostgreSQL JDBC driver can throw "prepared statement S_1 already exists"
+     * when multiple connections reuse cached prepared statements concurrently.
+     * Retrying with a small delay usually resolves this.
+     */
+    private void addWithRetry(List<Embedding> embeddings, List<TextSegment> segments, String jobId) {
+        int maxRetries = 3;
+        for (int attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                embeddingStore.addAll(embeddings, segments);
+                return; // success
+            } catch (Exception e) {
+                String msg = e.getMessage() != null ? e.getMessage() : "";
+                if (msg.contains("prepared statement") && msg.contains("already exists") && attempt < maxRetries) {
+                    log.warn("PgVector prepared statement conflict (attempt {}/{}), retrying in 500ms. jobId={}",
+                            attempt, maxRetries, jobId);
+                    try {
+                        Thread.sleep(500L * attempt);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new RuntimeException("Vectorization interrupted", ie);
+                    }
+                } else if (attempt < maxRetries) {
+                    log.warn("Vectorization batch failed (attempt {}/{}), retrying. jobId={}, error={}",
+                            attempt, maxRetries, jobId, msg);
+                    try {
+                        Thread.sleep(300L);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new RuntimeException("Vectorization interrupted", ie);
+                    }
+                } else {
+                    // Final attempt: try inserting one by one
+                    log.warn("Batch insert failed after {} retries, trying one-by-one. jobId={}", maxRetries, jobId);
+                    for (int i = 0; i < embeddings.size(); i++) {
+                        try {
+                            embeddingStore.add(embeddings.get(i), segments.get(i));
+                        } catch (Exception inner) {
+                            log.debug("Single insert failed for chunk {}, skipping. jobId={}", i, jobId);
+                        }
+                    }
+                }
+            }
         }
     }
 }

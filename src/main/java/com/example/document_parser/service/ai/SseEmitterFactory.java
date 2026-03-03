@@ -16,8 +16,9 @@ import java.io.IOException;
  * Фабрика SSE-эмиттеров с поддержкой fallback-модели.
  *
  * Два метода:
- *   stream()             — простой стриминг, без fallback
- *   streamWithFallback() — при ошибке содержащей errorMarker переключается на резервную модель
+ * stream() — простой стриминг, без fallback
+ * streamWithFallback() — при ошибке содержащей errorMarker переключается на
+ * резервную модель
  */
 @Component
 public class SseEmitterFactory {
@@ -39,28 +40,31 @@ public class SseEmitterFactory {
 
     /**
      * Стриминг с автоматическим fallback.
-     * При ошибке содержащей errorMarker (например "429") — повторяет запрос через fallback.
+     * При ошибке содержащей errorMarker (например "429") — повторяет запрос через
+     * fallback.
      * Пользователь не видит ошибку — получает ответ от резервной модели.
      */
     public SseEmitter streamWithFallback(StreamingChatLanguageModel primary,
-                                         StreamingChatLanguageModel fallback,
-                                         String prompt,
-                                         String context,
-                                         String errorMarker) {
+            StreamingChatLanguageModel fallback,
+            String prompt,
+            String context,
+            String errorMarker) {
         SseEmitter emitter = newEmitter(context);
         doStream(primary, prompt, context, emitter, fallback, errorMarker);
         return emitter;
     }
 
     private void doStream(StreamingChatLanguageModel model,
-                          String prompt,
-                          String context,
-                          SseEmitter emitter,
-                          StreamingChatLanguageModel fallback,
-                          String errorMarker) {
+            String prompt,
+            String context,
+            SseEmitter emitter,
+            StreamingChatLanguageModel fallback,
+            String errorMarker) {
         model.generate(prompt, new StreamingResponseHandler<AiMessage>() {
             @Override
             public void onNext(String token) {
+                if (token == null || token.isBlank())
+                    return;
                 try {
                     emitter.send(token);
                 } catch (IOException e) {
