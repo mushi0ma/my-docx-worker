@@ -16,25 +16,32 @@ import java.util.List;
 /**
  * Multi-Agent Document Generation Service (Task 8).
  *
- * Разбивает генерацию документа на 3 этапа:
- * 1. Planning Agent — создаёт структуру (список заголовков секций)
- * 2. Writing Agent — пишет контент для каждой секции
- * 3. Formatting Agent — превращает текст в DocumentBlock JSON
+ * Разбивает генерацию документа на 3 этапа с выделенными моделями:
+ * 1. Planning Agent (Groq) — создаёт структуру (список заголовков секций)
+ * 2. Writing Agent (Gemini) — пишет контент для каждой секции
+ * 3. Formatting Agent (Groq) — превращает текст в DocumentBlock JSON
  *
- * Каждый агент использует одну и ту же LLM с разными system prompts.
+ * Каждый агент использует оптимальную для задачи LLM.
  */
 @Service
 public class MultiAgentDocumentService {
 
     private static final Logger log = LoggerFactory.getLogger(MultiAgentDocumentService.class);
+    private static final int FORMAT_RETRIES = 2;
 
-    private final ChatLanguageModel model;
+    private final ChatLanguageModel plannerModel;
+    private final ChatLanguageModel writerModel;
+    private final ChatLanguageModel formatterModel;
     private final ObjectMapper objectMapper;
 
     public MultiAgentDocumentService(
-            @Qualifier("advancedModel") ChatLanguageModel model,
+            @Qualifier("plannerModel") ChatLanguageModel plannerModel,
+            @Qualifier("writerModel") ChatLanguageModel writerModel,
+            @Qualifier("formatterModel") ChatLanguageModel formatterModel,
             ObjectMapper objectMapper) {
-        this.model = model;
+        this.plannerModel = plannerModel;
+        this.writerModel = writerModel;
+        this.formatterModel = formatterModel;
         this.objectMapper = objectMapper;
     }
 
@@ -45,16 +52,13 @@ public class MultiAgentDocumentService {
      * @return готовый список DocumentBlock для передачи в DynamicDocxBuilderService
      */
     public List<DocumentBlock> generateWithAgentChain(String userPrompt) throws Exception {
-        if (model == null) {
-            throw new IllegalStateException("AI model (advancedModel) is not configured");
-        }
 
         // =====================================================
-        // STEP 1: Planning Agent — структура документа
+        // STEP 1: Planning Agent (Groq) — структура документа
         // =====================================================
-        log.info("📋 [Planning Agent] Generating document structure...");
+        log.info("📋 [Planning Agent / Groq] Generating document structure...");
         String planPrompt = AiPrompts.planDocument(userPrompt);
-        String planResponse = model.generate(planPrompt);
+        String planResponse = plannerModel.generate(planPrompt);
         planResponse = stripMarkdownFences(planResponse);
 
         List<String> sections;
@@ -65,12 +69,21 @@ public class MultiAgentDocumentService {
             log.warn("Planning Agent returned invalid JSON, using fallback structure: {}", e.getMessage());
             sections = List.of(userPrompt, "Введение", "Основная часть", "Заключение");
         }
+
+        // Validate: at least 2 sections, no more than 15
+        if (sections.size() < 2) {
+            sections = List.of(userPrompt, "Введение", "Основная часть", "Заключение");
+            log.warn("Planning Agent returned too few sections, using fallback");
+        } else if (sections.size() > 15) {
+            sections = sections.subList(0, 15);
+            log.warn("Planning Agent returned too many sections, truncated to 15");
+        }
         log.info("📋 [Planning Agent] Generated {} sections: {}", sections.size(), sections);
 
         // =====================================================
-        // STEP 2: Writing Agent — контент каждой секции
+        // STEP 2: Writing Agent (Gemini) — контент каждой секции
         // =====================================================
-        log.info("✍️ [Writing Agent] Writing content for {} sections...", sections.size());
+        log.info("✍️ [Writing Agent / Gemini] Writing content for {} sections...", sections.size());
         List<SectionContent> writtenSections = new ArrayList<>();
         StringBuilder previousContext = new StringBuilder();
 
@@ -79,7 +92,7 @@ public class MultiAgentDocumentService {
             log.info("✍️ [Writing Agent] Section {}/{}: {}", i + 1, sections.size(), sectionTitle);
 
             String writePrompt = AiPrompts.writeSection(sectionTitle, userPrompt, previousContext.toString());
-            String content = model.generate(writePrompt);
+            String content = writerModel.generate(writePrompt);
             writtenSections.add(new SectionContent(sectionTitle, content));
 
             // Accumulate context for next sections (limit to ~3000 chars)
@@ -92,54 +105,70 @@ public class MultiAgentDocumentService {
         }
 
         // =====================================================
-        // STEP 3: Formatting Agent — текст → DocumentBlock JSON
+        // STEP 3: Formatting Agent (Groq) — текст → DocumentBlock JSON
         // =====================================================
-        log.info("🎨 [Formatting Agent] Converting {} sections to DocumentBlocks...", writtenSections.size());
+        log.info("🎨 [Formatting Agent / Groq] Converting {} sections to DocumentBlocks...", writtenSections.size());
         List<DocumentBlock> allBlocks = new ArrayList<>();
 
         for (int i = 0; i < writtenSections.size(); i++) {
             SectionContent sc = writtenSections.get(i);
             log.info("🎨 [Formatting Agent] Formatting section {}/{}: {}", i + 1, writtenSections.size(), sc.title());
 
-            String formatPrompt = AiPrompts.formatToBlocks(sc.title(), sc.content(), i == 0);
-            String blocksJson = model.generate(formatPrompt);
-            blocksJson = stripMarkdownFences(blocksJson);
-
-            try {
-                List<DocumentBlock> sectionBlocks = objectMapper.readValue(
-                        blocksJson, new TypeReference<>() {
-                        });
-                allBlocks.addAll(sectionBlocks);
-            } catch (Exception e) {
-                log.warn("Formatting Agent failed for section '{}': {}. Adding as plain text.", sc.title(),
-                        e.getMessage());
-                // Fallback: add as plain paragraph blocks
-                allBlocks.add(DocumentBlock.builder()
-                        .type("PARAGRAPH")
-                        .alignment("LEFT")
-                        .runs(List.of(
-                                com.example.document_parser.dto.DocumentMetadataResponse.RunData.builder()
-                                        .text(sc.title())
-                                        .isBold(true)
-                                        .fontSize(16.0)
-                                        .color("1A237E")
-                                        .build()))
-                        .build());
-                allBlocks.add(DocumentBlock.builder()
-                        .type("PARAGRAPH")
-                        .alignment("BOTH")
-                        .runs(List.of(
-                                com.example.document_parser.dto.DocumentMetadataResponse.RunData.builder()
-                                        .text(sc.content())
-                                        .fontSize(12.0)
-                                        .color("000000")
-                                        .build()))
-                        .build());
-            }
+            List<DocumentBlock> sectionBlocks = formatSectionWithRetry(sc, i == 0);
+            allBlocks.addAll(sectionBlocks);
         }
 
         log.info("✅ [Multi-Agent] Pipeline complete. Total blocks: {}", allBlocks.size());
         return allBlocks;
+    }
+
+    /**
+     * Форматирует секцию с ретраями при ошибках JSON-парсинга.
+     */
+    private List<DocumentBlock> formatSectionWithRetry(SectionContent sc, boolean isFirstSection) {
+        for (int attempt = 1; attempt <= FORMAT_RETRIES; attempt++) {
+            try {
+                String formatPrompt = AiPrompts.formatToBlocks(sc.title(), sc.content(), isFirstSection);
+                String blocksJson = formatterModel.generate(formatPrompt);
+                blocksJson = stripMarkdownFences(blocksJson);
+
+                List<DocumentBlock> blocks = objectMapper.readValue(
+                        blocksJson, new TypeReference<>() {
+                        });
+                if (!blocks.isEmpty()) {
+                    return blocks;
+                }
+            } catch (Exception e) {
+                log.warn("Formatting attempt {}/{} failed for '{}': {}",
+                        attempt, FORMAT_RETRIES, sc.title(), e.getMessage());
+            }
+        }
+
+        // Final fallback: create plain paragraph blocks
+        log.warn("All formatting attempts failed for '{}', adding as plain text.", sc.title());
+        List<DocumentBlock> fallback = new ArrayList<>();
+        fallback.add(DocumentBlock.builder()
+                .type("PARAGRAPH")
+                .alignment("LEFT")
+                .runs(List.of(
+                        com.example.document_parser.dto.DocumentMetadataResponse.RunData.builder()
+                                .text(sc.title())
+                                .isBold(true)
+                                .fontSize(16.0)
+                                .color("1A237E")
+                                .build()))
+                .build());
+        fallback.add(DocumentBlock.builder()
+                .type("PARAGRAPH")
+                .alignment("BOTH")
+                .runs(List.of(
+                        com.example.document_parser.dto.DocumentMetadataResponse.RunData.builder()
+                                .text(sc.content())
+                                .fontSize(12.0)
+                                .color("000000")
+                                .build()))
+                .build());
+        return fallback;
     }
 
     private String stripMarkdownFences(String json) {

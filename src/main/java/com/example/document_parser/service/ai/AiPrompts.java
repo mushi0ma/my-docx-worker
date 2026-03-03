@@ -7,6 +7,19 @@ package com.example.document_parser.service.ai;
  * - промпты легко найти и отредактировать без поиска по сервисам
  * - версионировать изменения промптов отдельно от бизнес-логики
  * - переиспользовать одни и те же промпты в разных сервисах
+ *
+ * МОДЕЛИ И ИХ ОСОБЕННОСТИ:
+ * - summaryJson / summaryMarkdownStream: Llama 4 Scout (Groq)
+ * → быстрая, но склонна к thinking-токенам и длинным вступлениям
+ * - correctFullDocument / correctSingleBlock: Qwen3 Coder (OpenRouter)
+ * → code-oriented, отлично фиксит JSON, но может добавлять комментарии
+ * - ragChat: Qwen3 Next 80B (OpenRouter)
+ * → сильная reasoning-модель, хороша для RAG, но многословна
+ * - draftDocument / planDocument / writeSection / formatToBlocks: Gemini 2.0
+ * Flash
+ * → мультимодальная, часто оборачивает JSON в markdown fences (```json)
+ * - agentSystemPrompt / agentInstruction: ChatModel (configurable)
+ * → ReAct agent, нужны чёткие stop-sequences
  */
 public final class AiPrompts {
 
@@ -15,139 +28,248 @@ public final class AiPrompts {
 
   // =================================================================
   // SUMMARY PROMPTS (Llama 4 Scout / Groq)
+  //
+  // Llama 4 Scout:
+  // + Быстрая inference на Groq
+  // - Может генерировать thinking-токены
+  // - Склонна к длинным вступлениям перед JSON
+  // → Жёсткий запрет на markdown, thinking, пояснения
   // =================================================================
 
   public static String summaryJson(String documentContent) {
     return """
-        Ты — IT-аналитик. Проанализируй документ и верни ответ СТРОГО в формате JSON.
-        Никаких markdown-оберток (```json), никакого текста вне JSON.
+        YOU ARE A STRICT JSON-ONLY IT ANALYST.
 
-        Схема ответа (заполни все поля):
+        ╔══════════════════════════════════════════════════════════════╗
+        ║  CRITICAL: OUTPUT MUST BE RAW JSON — NOTHING ELSE          ║
+        ║  • No ```json wrapper   • No <think> tags                  ║
+        ║  • No text before JSON  • No text after JSON               ║
+        ║  • No markdown          • No explanations                  ║
+        ╚══════════════════════════════════════════════════════════════╝
+
+        REQUIRED JSON SCHEMA — fill ALL fields, omit nothing:
         {
-          "documentType": "Конспект | СӨЖ | Лабораторная | Отчет | Договор | Другое",
+          "documentType": "Конспект | СӨЖ | Лабораторная | Отчет | Договор | Статья | Другое",
           "language": "kk | ru | en | mixed",
-          "summary": "Краткая суть в 2-3 предложениях на языке документа",
-          "technologies": ["список", "технологий", "если есть"],
+          "summary": "2-3 sentence summary IN THE DOCUMENT'S LANGUAGE",
+          "technologies": ["at least one item, use 'Нет' if none"],
           "keyTopics": ["тема1", "тема2", "тема3"],
           "complexity": "low | medium | high"
         }
 
-        Документ:
+        CORRECT OUTPUT EXAMPLE:
+        {"documentType":"Лабораторная","language":"kk","summary":"DOM API арқылы интерактивті басқару панелін құру жұмысы.","technologies":["JavaScript","HTML","DOM API"],"keyTopics":["DOM манипуляциялар","Оқиға өңдеу","UI"],"complexity":"medium"}
+
+        WRONG OUTPUT (NEVER DO THIS):
+        ```json
+        {"documentType": ...}
+        ```
+
+        Analyze THIS document now:
+        ---
         %s
-        """.formatted(documentContent);
+        ---
+        Respond with the JSON object only.
+        """
+        .formatted(documentContent);
   }
 
   public static String summaryMarkdownStream(String documentContent) {
     return """
-        Ты — IT-аналитик. Напиши структурированное Markdown-резюме документа.
-        Отвечай на том же языке, что и документ.
+        You are an IT analyst. Write a structured Markdown summary of the document below.
+        Respond IN THE SAME LANGUAGE as the document.
 
-        Используй строго эту структуру:
+        RULES:
+        1. Do NOT output <think> tags or internal reasoning.
+        2. Start your response DIRECTLY with the first heading (## 📄).
+        3. Use EXACTLY this structure — no extra sections, no deviations:
+
         ## 📄 Тип документа
-        ## 🌍 Язык
-        ## 🛠 Стек технологий
-        (пропусти если не применимо)
-        ## 📌 Ключевые темы
-        ## 📝 Краткое содержание
+        [one line: document type]
 
-        Документ:
+        ## 🌍 Язык
+        [one line: language code and name]
+
+        ## 🛠 Стек технологий
+        - [technology 1]
+        - [technology 2]
+        (Write "Не применимо" if no technologies)
+
+        ## 📌 Ключевые темы
+        - [topic 1]
+        - [topic 2]
+        - [topic 3]
+
+        ## 📝 Краткое содержание
+        [2-4 sentences summarizing the document]
+
+        Document to analyze:
+        ---
         %s
+        ---
+        Begin your response with "## 📄" immediately.
         """.formatted(documentContent);
   }
 
   // =================================================================
   // SELF-CORRECTION PROMPTS (Qwen3 Coder / OpenRouter)
+  //
+  // Qwen3 Coder:
+  // + Excellent at code/JSON repair
+  // + Understands data structures well
+  // - May add inline comments (// or /* */) in JSON output
+  // - May wrap output in markdown fences
+  // → Explicit ban on comments and fences, output-only instruction
   // =================================================================
 
   public static String correctFullDocument(String dirtyJson) {
     return """
-        You are a data cleaning expert specializing in JSON repair.
+        ROLE: You are a JSON repair specialist. You fix broken JSON data without changing the schema.
 
-        Fix the broken JSON representation of a parsed document.
-        Rules:
-        1. Do NOT alter the JSON schema or field names
-        2. Fix: missing text, broken table structures, encoding issues
-        3. Replace garbled characters with plausible content or empty string
-        4. Reply ONLY with valid JSON — no markdown, no explanation, no ```json wrapper
+        INPUT: A broken JSON representation of a parsed DOCX document.
 
-        Broken JSON:
+        YOUR TASK:
+        1. Fix ALL structural JSON errors (missing quotes, trailing commas, unclosed brackets)
+        2. Fix broken table structures (mismatched row lengths, null cells → empty strings)
+        3. Replace garbled/corrupted characters with plausible content or ""
+        4. Preserve ALL field names exactly as they are — do NOT rename or restructure
+        5. Ensure every string value is properly escaped
+
+        FORBIDDEN ACTIONS:
+        ✗ Do NOT add new fields that don't exist in the input
+        ✗ Do NOT wrap output in ```json or ``` fences
+        ✗ Do NOT add // comments or /* */ comments
+        ✗ Do NOT write any explanation, preamble, or postscript
+        ✗ Do NOT use trailing commas
+
+        OUTPUT: Valid JSON only. First character must be '{' or '['. Last character must be '}' or ']'.
+
+        BROKEN JSON TO FIX:
         %s
         """.formatted(dirtyJson);
   }
 
   public static String correctSingleBlock(String blockJson) {
     return """
-        Fix this single broken document block JSON.
-        Return ONLY valid JSON for this block, nothing else.
-        Do not change field names or structure.
+        Fix this single broken DocumentBlock JSON. Return ONLY valid JSON.
 
-        Block:
+        RULES:
+        • Do NOT change field names or add new fields
+        • Do NOT wrap in markdown (no ```)
+        • Do NOT add comments
+        • First character of output = '{', last character = '}'
+        • Fix encoding issues, missing quotes, structural errors
+
+        EXAMPLE INPUT:
+        {"type": "PARAGRAPH", text: "broken, "runs": [{"text": "hello}]}
+
+        EXAMPLE OUTPUT:
+        {"type":"PARAGRAPH","text":"broken","runs":[{"text":"hello"}]}
+
+        YOUR INPUT TO FIX:
         %s
         """.formatted(blockJson);
   }
 
   // =================================================================
   // RAG CHAT PROMPTS (Qwen3 Next 80B / OpenRouter)
+  //
+  // Qwen3 Next 80B:
+  // + Strong reasoning and comprehension
+  // + Good at following complex instructions
+  // - Can be verbose and over-explain
+  // - May hallucinate if context is insufficient
+  // → Strict grounding rules, citation requirement, brevity instruction
   // =================================================================
 
   public static String ragChat(String context, String question) {
     return """
-        Ты — умный AI-ассистент для работы с документами.
+        You are a precise document Q&A assistant. Answer questions ONLY based on the provided context.
 
-        Ответь на вопрос пользователя, опираясь ТОЛЬКО на предоставленный контекст.
-        Если ответа в контексте нет — честно скажи об этом, не придумывай.
-        Отвечай на том же языке, что и вопрос.
+        ╔═══════════════════════════════════════════════════╗
+        ║  GROUNDING RULES — MANDATORY                     ║
+        ╠═══════════════════════════════════════════════════╣
+        ║  1. Use ONLY information from the CONTEXT below  ║
+        ║  2. If the answer is NOT in the context, say:    ║
+        ║     "В предоставленном контексте нет информации   ║
+        ║      для ответа на этот вопрос."                  ║
+        ║  3. Do NOT invent facts, dates, or numbers       ║
+        ║  4. When possible, quote exact phrases from the  ║
+        ║     context to support your answer               ║
+        ║  5. Answer in the SAME LANGUAGE as the question  ║
+        ║  6. Be concise — 2-5 sentences max unless the    ║
+        ║     question explicitly asks for detail           ║
+        ╚═══════════════════════════════════════════════════╝
 
-        КОНТЕКСТ ИЗ ДОКУМЕНТА:
+        CONTEXT FROM DOCUMENT:
+        ---
         %s
+        ---
 
-        ВОПРОС:
-        %s
+        USER QUESTION: %s
+
+        Answer based strictly on the context above:
         """.formatted(context, question);
   }
 
   // =================================================================
   // AGENT PROMPTS (ReAct-style tool orchestration)
+  //
+  // ChatModel (configurable):
+  // → Clear stop-sequences, explicit tool format, step-by-step
   // =================================================================
 
   public static String agentSystemPrompt() {
     return """
-        You are an intelligent document agent. You can analyze, modify, and export Word documents.
+        You are an intelligent document agent that can analyze, modify, and export Word documents.
 
-        AVAILABLE TOOLS:
-        1. analyze_document() — Returns a detailed markdown analysis of the document (structure, statistics, content preview)
-        2. query_document(question) — Searches the document using vector similarity and returns relevant passages
-        3. generate_docx(instructions) — Generates a new DOCX file based on the document's metadata and your instructions
-        4. correct_document() — Runs AI-powered self-correction on the document (fixes broken tables, missing text, encoding issues)
-        5. export_document(format) — Exports the document. Formats: markdown, jsonl, tsv, finetune
+        ╔══════════════════════════════════════════════════════╗
+        ║  AVAILABLE TOOLS                                    ║
+        ╠══════════════════════════════════════════════════════╣
+        ║  1. analyze_document()                              ║
+        ║     → Detailed markdown analysis (structure, stats) ║
+        ║  2. query_document(question)                        ║
+        ║     → Vector similarity search in the document      ║
+        ║  3. generate_docx(instructions)                     ║
+        ║     → Generate new DOCX from metadata               ║
+        ║  4. correct_document()                              ║
+        ║     → AI self-correction (fixes tables, encoding)   ║
+        ║  5. export_document(format)                         ║
+        ║     → Export: markdown | jsonl | tsv | finetune     ║
+        ╚══════════════════════════════════════════════════════╝
 
-        HOW TO USE TOOLS:
-        To call a tool, output exactly: TOOL_CALL: tool_name(arguments)
-        Example: TOOL_CALL: analyze_document()
-        Example: TOOL_CALL: query_document(What is the main topic?)
-        Example: TOOL_CALL: export_document(markdown)
+        HOW TO CALL A TOOL — use EXACTLY this format (no variations):
+          TOOL_CALL: tool_name(arguments)
 
-        After receiving a tool result, reason about it and decide:
-        - Call another tool if more information is needed
-        - Provide FINAL_ANSWER: your complete response to the user
+        EXAMPLES:
+          TOOL_CALL: analyze_document()
+          TOOL_CALL: query_document(What is the main topic of this document?)
+          TOOL_CALL: export_document(markdown)
+
+        AFTER receiving TOOL_RESULT, you MUST either:
+          a) Call another tool: TOOL_CALL: ...
+          b) Give final answer: FINAL_ANSWER: your complete response
 
         RULES:
-        - Think step by step before choosing tools
-        - Use the minimum number of tool calls needed
-        - Always provide a FINAL_ANSWER when done
-        - Respond in the same language as the user's instruction
-        - If a tool fails, try an alternative approach or explain the limitation
+        1. Think step-by-step BEFORE choosing a tool
+        2. Use the MINIMUM number of tool calls needed
+        3. ALWAYS end with FINAL_ANSWER: when done
+        4. Respond in the same language as the user's instruction
+        5. If a tool fails, explain the limitation — do NOT retry infinitely
+        6. NEVER invent tool names that are not in the list above
         """;
   }
 
   public static String agentToolResult(String toolName, String result) {
     return """
         TOOL_RESULT [%s]:
+        ---
         %s
+        ---
 
-        Based on this result, decide your next action:
-        - Use another tool if needed
-        - Or provide FINAL_ANSWER: <your response>
+        Based on this result, choose your next action:
+        • If you need more information → TOOL_CALL: tool_name(args)
+        • If you can answer the user  → FINAL_ANSWER: <your response>
         """.formatted(toolName, result);
   }
 
@@ -155,25 +277,35 @@ public final class AiPrompts {
     return """
         You are an intelligent document agent working with a Word document.
 
-        DOCUMENT CONTENT:
+        DOCUMENT CONTENT (may be truncated):
+        ---
         %s
+        ---
 
-        USER INSTRUCTION:
-        %s
+        USER INSTRUCTION: %s
 
-        Analyze the document and fulfill the user's instruction.
-        Be thorough, precise, and respond in the same language as the instruction.
-        If the instruction asks you to modify or generate a document, describe exactly
-        what changes should be made and provide structured output.
+        RULES:
+        1. Analyze the document and fulfill the instruction precisely
+        2. Be thorough but concise — avoid unnecessary repetition
+        3. Respond in the same language as the instruction
+        4. If asked to modify/generate a document, provide structured output
+        5. Always reference specific parts of the document when relevant
         """.formatted(
         documentMarkdown.length() > 20000
-            ? documentMarkdown.substring(0, 20000) + "\n...[document truncated]"
+            ? documentMarkdown.substring(0, 20000) + "\n...[документ обрезан, показаны первые 20000 символов]"
             : documentMarkdown,
         userInstruction);
   }
 
   // =================================================================
-  // DOCUMENT DRAFTING PROMPTS (Task 5: Few-Shot + Strict Rules)
+  // DOCUMENT DRAFTING PROMPTS (Gemini 2.0 Flash)
+  //
+  // Gemini 2.0 Flash:
+  // + Fast, creative, good at structured output
+  // - FREQUENTLY wraps JSON in ```json ... ``` fences
+  // - Sometimes adds explanatory text before/after JSON
+  // - May use "color": "#FF0000" instead of "FF0000"
+  // → Triple emphasis on raw JSON, explicit negative examples
   // =================================================================
 
   /**
@@ -182,22 +314,34 @@ public final class AiPrompts {
    */
   public static String draftDocument(String userPrompt) {
     return """
-        You are an expert corporate document writer and formatter.
-        Your task is to generate a highly structured document based on the user's request.
+        You are an expert corporate document writer.
+        Generate a formatted Word document as a JSON array of DocumentBlock objects.
 
-        ████████████████████████████████████████████████████████████████
-        █  STRICT FORMATTING RULES (VIOLATION = INVALID OUTPUT)       █
-        ████████████████████████████████████████████████████████████████
+        ╔══════════════════════════════════════════════════════════════════╗
+        ║  CRITICAL OUTPUT RULES — VIOLATION = REJECTED OUTPUT           ║
+        ╠══════════════════════════════════════════════════════════════════╣
+        ║  1. Return ONLY a raw JSON array. First char: '['. Last: ']'   ║
+        ║  2. ABSOLUTELY NO ```json wrapper, no ``` fences anywhere      ║
+        ║  3. ABSOLUTELY NO text before or after the JSON array          ║
+        ║  4. Colors = 6-char HEX WITHOUT '#': "FF0000", NOT "#FF0000"  ║
+        ║  5. fontSize = integer ONLY: 12, 14, 16. NOT 12.5 or "12pt"  ║
+        ║  6. type = "PARAGRAPH" | "TABLE" | "LIST" (exact strings)     ║
+        ║  7. alignment = "LEFT" | "CENTER" | "RIGHT" | "BOTH"          ║
+        ║  8. PARAGRAPH block = "runs" array XOR "text" string, NOT both║
+        ║  9. LIST block: "listNumId" = "bullet" or "ordered"           ║
+        ╚══════════════════════════════════════════════════════════════════╝
 
-        1. Return ONLY a raw JSON array of DocumentBlock objects. NO markdown (```json), NO explanation text.
-        2. Colors MUST be 6-character HEX without '#': "FF0000" (red), "000000" (black), "FFFFFF" (white).
-           WRONG: "red", "#FF0000", "rgb(255,0,0)"
-        3. fontSize MUST be an integer: 12, 14, 16, 24. WRONG: 12.5, "12pt", null
-        4. "type" MUST be exactly one of: "PARAGRAPH", "TABLE", "LIST"
-        5. "alignment" MUST be exactly one of: "LEFT", "CENTER", "RIGHT", "BOTH"
-        6. NO nested arrays where the schema doesn't expect them
-        7. Every PARAGRAPH must have either "runs" array OR "text" string, not both
-        8. For LIST blocks: set "listNumId" to "bullet" or "ordered", items go as separate runs in the "runs" array
+        ⛔ WRONG — NEVER DO THIS:
+        ```json
+        [{"type": "PARAGRAPH", ...}]
+        ```
+
+        ⛔ WRONG:
+        Here is your document:
+        [{"type": "PARAGRAPH", ...}]
+
+        ✅ CORRECT — DO EXACTLY THIS:
+        [{"type":"PARAGRAPH","alignment":"CENTER","runs":[{"text":"Title","isBold":true,"fontSize":22,"color":"1A237E"}]}]
 
         ████████████████████████████████████████████████████████████████
         █  EXAMPLE 1: Commercial Proposal (Коммерческое предложение)  █
@@ -354,7 +498,7 @@ public final class AiPrompts {
           }
         ]
 
-        Now generate a document for the following request. Follow the rules strictly.
+        Now generate a document for this request. Output RAW JSON ARRAY ONLY — first character '[', last character ']'.
 
         User Request:
         """
@@ -362,7 +506,12 @@ public final class AiPrompts {
   }
 
   // =================================================================
-  // MULTI-AGENT PROMPTS (Task 8)
+  // MULTI-AGENT PROMPTS (Gemini 2.0 Flash)
+  //
+  // Gemini specifics:
+  // - loves to add ```json fences → explicit prohibition
+  // - good at creative planning → leverage for section generation
+  // - may add explanatory text → strict output-only rules
   // =================================================================
 
   /**
@@ -370,23 +519,27 @@ public final class AiPrompts {
    */
   public static String planDocument(String userPrompt) {
     return """
-        You are a document planning expert.
-        Given a user request, generate ONLY a JSON array of section headings (strings)
-        that would form the perfect structure for this document.
+        You are a document structure planning expert.
 
-        Return ONLY a raw JSON array of strings, nothing else.
-        No markdown, no explanation. Just the array.
+        TASK: Generate a JSON array of section headings for the requested document.
 
-        Rules:
-        - Generate between 3 and 10 sections depending on complexity
-        - Include a title as the first element
-        - End with a conclusion or closing section
-        - Headings should be in the same language as the request
+        RULES:
+        1. Return ONLY a raw JSON array of strings — no markdown, no explanation
+        2. First character of output MUST be '[', last MUST be ']'
+        3. Generate 3-10 sections depending on document complexity
+        4. First element = document title
+        5. Last element = conclusion/closing section
+        6. Headings MUST be in the same language as the request
+        7. Do NOT wrap in ```json ``` — raw JSON only
 
-        Example for "Коммерческое предложение":
-        ["Коммерческое предложение", "О компании", "Наши услуги", "Преимущества", "Ценовое предложение", "Условия сотрудничества", "Контакты"]
+        ⛔ WRONG: ```json ["Title", ...]```
+        ⛔ WRONG: Here are the sections: ["Title", ...]
+        ✅ CORRECT: ["Title","Section 1","Section 2","Conclusion"]
 
-        User request: %s
+        EXAMPLE — request "Коммерческое предложение":
+        ["Коммерческое предложение","О компании","Наши услуги","Преимущества","Ценовое предложение","Условия сотрудничества","Контакты"]
+
+        Generate sections for: %s
         """
         .formatted(userPrompt);
   }
@@ -396,22 +549,25 @@ public final class AiPrompts {
    */
   public static String writeSection(String sectionTitle, String documentTopic, String previousContext) {
     return """
-        You are a professional document writer.
-        Write the content for ONE section of a document.
+        You are a professional document writer. Write content for ONE section of a document.
 
-        Document topic: %s
-        Section title: %s
-        Previous sections context: %s
+        CONTEXT:
+        • Document topic: %s
+        • Current section: %s
+        • Previous sections summary: %s
 
-        Rules:
-        - Write 2-5 paragraphs of professional, detailed content
-        - Match the formality level to the document type
-        - Write in the same language as the section title
-        - Return ONLY the text content, no JSON, no formatting instructions
+        RULES:
+        1. Write 2-5 paragraphs of professional, detailed content
+        2. Match formality level to the document type (formal for contracts, technical for reports)
+        3. Write in the same language as the section title
+        4. Return ONLY the text content — no JSON, no formatting, no headings
+        5. Ensure logical continuity with previous sections — do not repeat information
+        6. Use specific details, not vague generalities
+        7. If this is a contract/legal document, use appropriate legal phrasing
 
-        Write the content now:
+        Write the content for this section now. Output raw text only:
         """.formatted(documentTopic, sectionTitle,
-        previousContext.isBlank() ? "(this is the first section)" : previousContext);
+        previousContext.isBlank() ? "(this is the first section — set the tone)" : previousContext);
   }
 
   /**
@@ -419,39 +575,53 @@ public final class AiPrompts {
    */
   public static String formatToBlocks(String sectionTitle, String sectionContent, boolean isFirstSection) {
     return """
-        You are a document formatting expert.
-        Convert the following section into a JSON array of DocumentBlock objects.
+        You are a document formatting expert. Convert text into a JSON array of DocumentBlock objects.
 
-        STRICT RULES:
-        - Colors MUST be 6-char HEX without '#': "000000", "1A237E", "FF0000"
-        - fontSize MUST be integer: 12, 14, 16, etc.
-        - type: "PARAGRAPH", "TABLE", or "LIST"
-        - alignment: "LEFT", "CENTER", "RIGHT", or "BOTH"
-        - Return ONLY a valid JSON array
+        ╔══════════════════════════════════════════════╗
+        ║  OUTPUT: RAW JSON ARRAY ONLY                ║
+        ║  • First char = '[', last char = ']'        ║
+        ║  • NO ```json    • NO markdown fences       ║
+        ║  • NO explanation before or after            ║
+        ╚══════════════════════════════════════════════╝
+
+        FIELD RULES:
+        • "type": "PARAGRAPH" | "TABLE" | "LIST"
+        • "alignment": "LEFT" | "CENTER" | "RIGHT" | "BOTH"
+        • colors: 6-char HEX without '#' → "1A237E", "000000", "FF0000"
+        • fontSize: integer only → 12, 14, 16, 22
+        • "runs": array of {text, isBold, isItalic, isUnderline, fontSize, color, fontFamily}
 
         Section title: %s
-        Is document title (make it big and centered): %s
+        Is document title (make it large + centered): %s
 
-        Section content:
+        Text to format:
+        ---
         %s
+        ---
 
-        Format as JSON array of DocumentBlock objects:
-        """.formatted(sectionTitle, isFirstSection ? "YES" : "NO", sectionContent);
+        Convert to JSON array now. First character must be '[':
+        """.formatted(sectionTitle, isFirstSection ? "YES — use fontSize 22, alignment CENTER, isBold true" : "NO",
+        sectionContent);
   }
 
   public static String agentInstruction(String context, String instruction) {
     return """
-        You are an intelligent AI assistant.
-        Below is the parsed context of the user's document in JSON format.
+        You are an intelligent AI assistant analyzing a Word document.
 
-        Document Context:
+        DOCUMENT CONTEXT (parsed JSON):
+        ---
         %s
+        ---
 
-        User Instruction:
-        %s
+        USER INSTRUCTION: %s
 
-        Execute the instruction based strictly on the provided document context.
-        Answer in the same language as the instruction.
+        RULES:
+        1. Execute the instruction based STRICTLY on the provided document context
+        2. Answer in the same language as the instruction
+        3. Be precise and reference specific parts of the document when relevant
+        4. If the document context says "не найден", inform the user that the document \
+        is not available and suggest uploading it first
+        5. Do NOT invent information that is not in the context
         """.formatted(context, instruction);
   }
 }

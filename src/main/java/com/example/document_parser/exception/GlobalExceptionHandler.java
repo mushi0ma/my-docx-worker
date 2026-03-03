@@ -6,7 +6,10 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.HttpRequestMethodNotSupportedException;
+import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.multipart.support.MissingServletRequestPartException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.net.URI;
@@ -54,6 +57,26 @@ public class GlobalExceptionHandler {
         log.warn("File too large: {}", ex.getMessage());
         return problem(HttpStatus.PAYLOAD_TOO_LARGE,
                 "Файл слишком большой. Максимум: 50MB", "file-too-large");
+    }
+
+    @ExceptionHandler(MissingServletRequestParameterException.class)
+    public ProblemDetail handleMissingParam(MissingServletRequestParameterException ex) {
+        return problem(HttpStatus.BAD_REQUEST, ex.getMessage(), "missing-parameter");
+    }
+
+    @ExceptionHandler(MissingServletRequestPartException.class)
+    public ProblemDetail handleMissingPart(MissingServletRequestPartException ex) {
+        return problem(HttpStatus.BAD_REQUEST, ex.getMessage(), "missing-part");
+    }
+
+    @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
+    public ProblemDetail handleMethodNotSupported(HttpRequestMethodNotSupportedException ex) {
+        return problem(HttpStatus.METHOD_NOT_ALLOWED, ex.getMessage(), "method-not-allowed");
+    }
+
+    @ExceptionHandler(org.springframework.web.HttpMediaTypeNotSupportedException.class)
+    public ProblemDetail handleMediaTypeNotSupported(org.springframework.web.HttpMediaTypeNotSupportedException ex) {
+        return problem(HttpStatus.UNSUPPORTED_MEDIA_TYPE, ex.getMessage(), "unsupported-media-type");
     }
 
     @ExceptionHandler(Exception.class)

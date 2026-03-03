@@ -38,7 +38,7 @@ public class DocumentDraftingAgent {
 
     private static final Logger log = LoggerFactory.getLogger(DocumentDraftingAgent.class);
 
-    private final ChatLanguageModel advancedModel;
+    private final ChatLanguageModel writerModel;
     private final DynamicDocxBuilderService docxBuilder;
     private final ObjectMapper objectMapper;
     private final MultiAgentDocumentService multiAgentService;
@@ -47,14 +47,14 @@ public class DocumentDraftingAgent {
     private final EmbeddingModel embeddingModel;
 
     public DocumentDraftingAgent(
-            @Qualifier("advancedModel") ChatLanguageModel advancedModel,
+            @Qualifier("writerModel") ChatLanguageModel writerModel,
             DynamicDocxBuilderService docxBuilder,
             ObjectMapper objectMapper,
             MultiAgentDocumentService multiAgentService,
             @org.springframework.lang.Nullable DocumentDraftingAiService aiService,
             EmbeddingStore<TextSegment> embeddingStore,
             EmbeddingModel embeddingModel) {
-        this.advancedModel = advancedModel;
+        this.writerModel = writerModel;
         this.docxBuilder = docxBuilder;
         this.objectMapper = objectMapper;
         this.multiAgentService = multiAgentService;
@@ -108,13 +108,13 @@ public class DocumentDraftingAgent {
         if (blocks == null) {
             log.info("📝 Используем fallback: ручной generate() + JSON...");
 
-            if (advancedModel == null) {
-                throw new IllegalStateException("Модель не настроена. Проверь GEMINI_API_KEY в .env");
+            if (writerModel == null) {
+                throw new IllegalStateException("Модель не настроена. Проверь GEMINI_API_KEY или GROQ_API_KEY в .env");
             }
 
             String fullPrompt = AiPrompts.draftDocument(enrichedPrompt);
             log.info("⏳ Ожидание ответа от модели...");
-            String jsonResponse = advancedModel.generate(fullPrompt);
+            String jsonResponse = writerModel.generate(fullPrompt);
             log.info("✅ Модель сгенерировала ответ, парсим JSON...");
 
             jsonResponse = stripMarkdownFences(jsonResponse);

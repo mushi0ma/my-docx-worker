@@ -23,12 +23,19 @@ public class ImageExtractor {
             XWPFPictureData picData = picture.getPictureData();
             byte[] bytes = picData.getData();
             String extension = picData.suggestFileExtension();
-            String fileName = picture.getDescription();
+            String rawName = picture.getDescription();
 
-            if (fileName == null || fileName.trim().isEmpty()) {
+            String fileName;
+            if (rawName == null || rawName.trim().isEmpty()) {
                 fileName = "image_" + System.currentTimeMillis() + "." + extension;
-            } else if (!fileName.endsWith("." + extension)) {
-                fileName += "." + extension;
+            } else {
+                // Sanitize: remove characters unsafe for filesystems
+                String sanitized = rawName.replaceAll("[\\\\/:*?\"<>|\\n\\r]", "_").trim();
+                // Truncate to avoid "File name too long" (max ~255 bytes on most FS)
+                if (sanitized.length() > 100) {
+                    sanitized = sanitized.substring(0, 100);
+                }
+                fileName = sanitized.endsWith("." + extension) ? sanitized : sanitized + "." + extension;
             }
 
             String cleanJobId = jobId.replace("-", "");

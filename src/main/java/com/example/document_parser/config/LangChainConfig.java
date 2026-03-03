@@ -23,21 +23,19 @@ import java.time.Duration;
 /**
  * Конфигурация AI-моделей.
  *
- * ┌──────────────────────────────────────────────────────────────────────┐
+ * ┌───────────────────────────────────────────────────────────────────────────┐
  * │ ЗАДАЧА │ МОДЕЛЬ │ ПРОВАЙДЕР │
- * ├──────────────────────────────────────────────────────────────────────┤
+ * ├───────────────────────────────────────────────────────────────────────────┤
  * │ Summary (sync) │ llama-4-scout-17b-16e │ Groq │
  * │ Summary (stream) │ llama-4-scout-17b-16e │ Groq │
- * │ RAG-чат (основная) │ qwen3-next-80b-a3b:free │ OpenRouter │
+ * │ RAG-чат (основная) │ openrouter/free │ OpenRouter │
  * │ RAG-чат (fallback) │ openrouter/free │ OpenRouter │
- * │ JSON-коррекция │ qwen3-coder 480B:free │ OpenRouter │
+ * │ JSON-коррекция │ qwen3-coder:free │ OpenRouter │
+ * │ Planning Agent │ llama-4-scout-17b-16e │ Groq (fast struct) │
+ * │ Writing Agent │ gemini-2.5-flash │ Google AI Studio │
+ * │ Formatting Agent │ llama-4-scout-17b-16e │ Groq (fast JSON) │
  * │ Embeddings │ all-minilm-l6-v2 (local) │ локально │
- * └──────────────────────────────────────────────────────────────────────┘
- *
- * Почему нужен fallback:
- * Бесплатные модели на OpenRouter имеют лимит 50 req/day (200 с кредитами).
- * При rate limit провайдера Venice возвращается 429 — переключаемся на
- * openrouter/free который автоматически выбирает доступную модель.
+ * └───────────────────────────────────────────────────────────────────────────┘
  */
 @Configuration
 public class LangChainConfig {
@@ -179,14 +177,68 @@ public class LangChainConfig {
             return null;
         }
 
-        log.info("Успешно подключена модель Gemini 3.0 flash (Google AI Studio)");
+        log.info("Успешно подключена модель Gemini 2.5 Flash (Google AI Studio)");
 
         return GoogleAiGeminiChatModel.builder()
                 .apiKey(geminiApiKey)
-                .modelName("gemini-3.0-flash-preview")
+                .modelName("gemini-2.5-flash")
                 .temperature(0.4)
                 .maxOutputTokens(8192)
                 .build();
+    }
+
+    // =================================================================
+    // MULTI-AGENT: Dedicated models per agent role
+    // =================================================================
+
+    /**
+     * Planning Agent — генерирует структуру документа (список секций).
+     * Groq/Llama: быстрый, хорошо работает со структурированным выводом.
+     */
+    @Bean("plannerModel")
+    public ChatLanguageModel plannerModel() {
+        return buildChatModel(
+                "https://api.groq.com/openai/v1",
+                groqApiKey,
+                "meta-llama/llama-4-scout-17b-16e-instruct",
+                groqTimeoutSeconds);
+    }
+
+    /**
+     * Writing Agent — пишет контент каждой секции.
+     * Gemini 2.5 Flash: высококачественная генерация текста, большой контекст.
+     * Fallback на Groq если Gemini недоступен.
+     */
+    @Bean("writerModel")
+    public ChatLanguageModel writerModel(@Value("${google.gemini.api-key:}") String geminiApiKey) {
+        if (geminiApiKey != null && !geminiApiKey.isBlank()
+                && !geminiApiKey.equals("твой_ключ_от_google_ai_studio")) {
+            return GoogleAiGeminiChatModel.builder()
+                    .apiKey(geminiApiKey)
+                    .modelName("gemini-2.5-flash")
+                    .temperature(0.7)
+                    .maxOutputTokens(8192)
+                    .build();
+        }
+        log.warn("⚠️ Gemini API key not set, writerModel falls back to Groq");
+        return buildChatModel(
+                "https://api.groq.com/openai/v1",
+                groqApiKey,
+                "meta-llama/llama-4-scout-17b-16e-instruct",
+                groqTimeoutSeconds);
+    }
+
+    /**
+     * Formatting Agent — превращает текст в DocumentBlock JSON.
+     * Groq/Llama: быстрый, детерминированный вывод JSON.
+     */
+    @Bean("formatterModel")
+    public ChatLanguageModel formatterModel() {
+        return buildChatModel(
+                "https://api.groq.com/openai/v1",
+                groqApiKey,
+                "meta-llama/llama-4-scout-17b-16e-instruct",
+                groqTimeoutSeconds);
     }
 
     /**

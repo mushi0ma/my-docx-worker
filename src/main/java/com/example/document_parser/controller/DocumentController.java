@@ -371,8 +371,18 @@ public class DocumentController {
 
     @Operation(summary = "Generate a completely new DOCX using AI")
     @PostMapping(value = "/generate-ai", consumes = { MediaType.APPLICATION_FORM_URLENCODED_VALUE,
-            MediaType.MULTIPART_FORM_DATA_VALUE })
-    public ResponseEntity<?> generateDocumentByAi(@RequestParam String prompt) {
+            MediaType.MULTIPART_FORM_DATA_VALUE, MediaType.APPLICATION_JSON_VALUE })
+    public ResponseEntity<?> generateDocumentByAi(
+            @RequestParam(required = false) String prompt,
+            @RequestBody(required = false) Map<String, String> body) {
+        // Support both form-data (prompt as @RequestParam) and JSON body ({"prompt":
+        // "..."})
+        if (prompt == null && body != null) {
+            prompt = body.get("prompt");
+        }
+        if (prompt == null || prompt.isBlank()) {
+            throw new IllegalArgumentException("Parameter 'prompt' is required");
+        }
         String jobId = UUID.randomUUID().toString();
         try {
             java.io.File generatedFile = documentDraftingAgent.draftNewDocument(prompt, jobId);
