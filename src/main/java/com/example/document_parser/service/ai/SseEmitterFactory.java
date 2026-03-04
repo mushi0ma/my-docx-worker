@@ -11,6 +11,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
+import java.util.regex.Pattern;
 
 /**
  * Фабрика SSE-эмиттеров с поддержкой fallback-модели.
@@ -24,6 +25,19 @@ import java.io.IOException;
 public class SseEmitterFactory {
 
     private static final Logger log = LoggerFactory.getLogger(SseEmitterFactory.class);
+
+    /**
+     * Regex для удаления &lt;think&gt;...&lt;/think&gt; блоков (включая
+     * многострочные).
+     */
+    private static final Pattern THINK_TAG_PATTERN = Pattern.compile(
+            "<think>.*?</think>", Pattern.DOTALL);
+
+    /**
+     * Zero-width и невидимые Unicode символы, которые бесплатные модели часто шлют.
+     */
+    private static final Pattern INVISIBLE_CHARS_PATTERN = Pattern.compile(
+            "[\\u200B\\u200C\\u200D\\uFEFF\\u00AD\\u2060\\u180E]");
 
     @Value("${app.ai.sse.timeout-ms:120000}")
     private long sseTimeoutMs;
@@ -63,10 +77,12 @@ public class SseEmitterFactory {
         model.generate(prompt, new StreamingResponseHandler<AiMessage>() {
             @Override
             public void onNext(String token) {
-                if (token == null || token.isBlank())
+                String sanitized = sanitizeToken(token);
+                if (sanitized == null || sanitized.isEmpty()) {
                     return;
+                }
                 try {
-                    emitter.send(token);
+                    emitter.send(sanitized);
                 } catch (IOException e) {
                     // Клиент отключился — тихо завершаем
                     emitter.complete();
@@ -92,6 +108,47 @@ public class SseEmitterFactory {
                 }
             }
         });
+    }
+
+    /**
+     * Очищает токен от мусора, возвращаемого бесплатными LLM-моделями.
+     * <p>
+     * Удаляет:
+     * - &lt;think&gt;...&lt;/think&gt; блоки (reasoning от Qwen/DeepSeek)
+     * - Zero-width символы (U+200B, U+FEFF и т.д.)
+     * - ASCII control chars (кроме \n и \t — они могут быть частью форматирования)
+     * <p>
+     * Package-private для тестрирования.
+     *
+     * @return очищенный токен, или null если токен пуст после очистки
+     */
+    static String sanitizeToken(String token) {
+        if (token == null) {
+            return null;
+        }
+
+        // 1. Strip <think>...</think> blocks
+        String cleaned = THINK_TAG_PATTERN.matcher(token).replaceAll("");
+
+        // 2. Remove zero-width / invisible Unicode chars
+        cleaned = INVISIBLE_CHARS_PATTERN.matcher(cleaned).replaceAll("");
+
+        // 3. Remove ASCII control characters except \n (0x0A) and \t (0x09)
+        StringBuilder sb = new StringBuilder(cleaned.length());
+        for (int i = 0; i < cleaned.length(); i++) {
+            char c = cleaned.charAt(i);
+            if (c >= 0x20 || c == '\n' || c == '\t') {
+                sb.append(c);
+            }
+        }
+        cleaned = sb.toString();
+
+        // 4. If result is blank (only whitespace), discard
+        if (cleaned.isBlank()) {
+            return null;
+        }
+
+        return cleaned;
     }
 
     private SseEmitter newEmitter(String context) {

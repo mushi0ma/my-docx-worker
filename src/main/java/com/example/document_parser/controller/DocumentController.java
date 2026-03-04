@@ -44,6 +44,8 @@ import java.util.stream.Collectors;
 @Tag(name = "Document Parser", description = "API для асинхронного парсинга и экспорта DOCX")
 public class DocumentController {
 
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(DocumentController.class);
+
     private final DocumentProducer documentProducer;
     private final StringRedisTemplate redisTemplate;
     private final DocumentRepository documentRepository;
@@ -395,11 +397,22 @@ public class DocumentController {
                     .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"AI_Generated.docx\"")
                     .body(resource);
         } catch (Exception e) {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+            log.error("AI document generation failed for jobId={}: {}", jobId, e.getMessage(), e);
+
+            String errorMsg = e.getMessage() != null ? e.getMessage() : "Unknown error";
+            boolean isRateLimited = errorMsg.contains("429")
+                    || errorMsg.toLowerCase().contains("rate limit")
+                    || errorMsg.toLowerCase().contains("too many requests");
+
+            HttpStatus status = isRateLimited ? HttpStatus.SERVICE_UNAVAILABLE : HttpStatus.INTERNAL_SERVER_ERROR;
+            String errorType = isRateLimited ? "AI model rate limited" : "AI document generation failed";
+
+            return ResponseEntity.status(status)
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(Map.of(
-                            "error", "AI document generation failed",
-                            "message", e.getMessage() != null ? e.getMessage() : "Unknown error",
+                            "status", status.value(),
+                            "error", errorType,
+                            "message", errorMsg,
                             "jobId", jobId));
         }
     }

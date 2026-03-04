@@ -93,7 +93,7 @@ class DocumentDraftingAgentTest {
         void draftNewDocument_multiAgentSuccess_usesChainAndCallsBuilder() throws Exception {
                 List<DocumentBlock> expectedBlocks = List.of(
                                 DocumentBlock.builder().type("PARAGRAPH").text("Title").build());
-                when(multiAgentService.generateWithAgentChain(anyString())).thenReturn(expectedBlocks);
+                when(multiAgentService.generateWithAgentChain(anyString(), anyString())).thenReturn(expectedBlocks);
 
                 File fakeFile = tempDir.resolve("test.docx").toFile();
                 fakeFile.createNewFile();
@@ -102,7 +102,7 @@ class DocumentDraftingAgentTest {
                 File result = agent.draftNewDocument("Создай отчёт", "job-1");
 
                 assertNotNull(result);
-                verify(multiAgentService).generateWithAgentChain(anyString());
+                verify(multiAgentService).generateWithAgentChain(anyString(), anyString());
                 verify(docxBuilder).buildDocumentFromBlocks(eq(expectedBlocks), eq("job-1"));
                 // writerModel НЕ должен вызываться — multiAgent справился
                 verify(writerModel, never()).generate(anyString());
@@ -114,7 +114,7 @@ class DocumentDraftingAgentTest {
 
     @Test
     void draftNewDocument_multiAgentFails_fallsBackToAiService() throws Exception {
-        when(multiAgentService.generateWithAgentChain(anyString()))
+        when(multiAgentService.generateWithAgentChain(anyString(), anyString()))
                 .thenThrow(new RuntimeException("Multi-agent failed"));
 
         List<DocumentBlock> aiBlocks = List.of(
@@ -129,7 +129,7 @@ class DocumentDraftingAgentTest {
         File result = agent.draftNewDocument("Создай договор", "job-2");
 
         assertNotNull(result);
-        verify(multiAgentService).generateWithAgentChain(anyString());
+        verify(multiAgentService).generateWithAgentChain(anyString(), anyString());
         verify(aiService).generateDocument(anyString());
         verify(writerModel, never()).generate(anyString());
     }
@@ -140,7 +140,7 @@ class DocumentDraftingAgentTest {
 
     @Test
     void draftNewDocument_allStrategiesFail_usesManualFallback() throws Exception {
-        when(multiAgentService.generateWithAgentChain(anyString()))
+        when(multiAgentService.generateWithAgentChain(anyString(), anyString()))
                 .thenThrow(new RuntimeException("fail"));
 
         // aiService = null → скипается (проверяем null-safe в конструкторе)
@@ -171,7 +171,7 @@ class DocumentDraftingAgentTest {
 
     @Test
     void draftNewDocument_aiReturnsMarkdownFences_stripsAndParses() throws Exception {
-        when(multiAgentService.generateWithAgentChain(anyString()))
+        when(multiAgentService.generateWithAgentChain(anyString(), anyString()))
                 .thenThrow(new RuntimeException("fail"));
 
         agent = new DocumentDraftingAgent(

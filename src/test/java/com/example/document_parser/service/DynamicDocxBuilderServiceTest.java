@@ -377,4 +377,64 @@ class DynamicDocxBuilderServiceTest {
                     "Unknown type должен обрабатываться как PARAGRAPH");
         }
     }
+
+    // ================================================================
+    // LIST — formatted runs + two lists in a row
+    // ================================================================
+
+    @Test
+    void buildList_withFormattedRuns_preservesStyling() throws Exception {
+        RunData boldItem = RunData.builder().text("Жирный пункт").isBold(true).color("FF0000").fontSize(14.0).build();
+        RunData italicItem = RunData.builder().text("Курсивный пункт").isItalic(true).color("0000FF").build();
+
+        DocumentBlock listBlock = DocumentBlock.builder()
+                .type("LIST")
+                .listNumId("bullet")
+                .listLevel("0")
+                .runs(List.of(boldItem, italicItem))
+                .build();
+
+        File result = service.buildDocumentFromBlocks(List.of(listBlock), "test-list-styled");
+
+        try (FileInputStream fis = new FileInputStream(result);
+                XWPFDocument doc = new XWPFDocument(fis)) {
+            // Should have at least 2 paragraphs (one per list item)
+            assertTrue(doc.getParagraphs().size() >= 2, "Должны быть минимум 2 параграфа для двух list items");
+
+            XWPFRun firstRun = doc.getParagraphs().get(0).getRuns().get(0);
+            assertTrue(firstRun.isBold(), "Первый пункт должен быть жирным");
+            assertEquals("FF0000", firstRun.getColor(), "Первый пункт должен быть красным");
+            assertEquals(14, firstRun.getFontSizeAsDouble().intValue(), "Размер шрифта = 14");
+
+            XWPFRun secondRun = doc.getParagraphs().get(1).getRuns().get(0);
+            assertTrue(secondRun.isItalic(), "Второй пункт должен быть курсивным");
+            assertEquals("0000FF", secondRun.getColor(), "Второй пункт должен быть синим");
+        }
+    }
+
+    @Test
+    void buildList_twoListsInRow_noConflict() throws Exception {
+        DocumentBlock bulletList = DocumentBlock.builder()
+                .type("LIST").listNumId("bullet").listLevel("0")
+                .runs(List.of(
+                        RunData.builder().text("Bullet 1").build(),
+                        RunData.builder().text("Bullet 2").build()))
+                .build();
+
+        DocumentBlock orderedList = DocumentBlock.builder()
+                .type("LIST").listNumId("ordered").listLevel("0")
+                .runs(List.of(
+                        RunData.builder().text("Step 1").build(),
+                        RunData.builder().text("Step 2").build()))
+                .build();
+
+        File result = service.buildDocumentFromBlocks(List.of(bulletList, orderedList), "test-two-lists");
+
+        assertTrue(result.exists(), "Файл должен создаться");
+        try (FileInputStream fis = new FileInputStream(result);
+                XWPFDocument doc = new XWPFDocument(fis)) {
+            assertTrue(doc.getParagraphs().size() >= 4,
+                    "Два списка по 2 пункта = минимум 4 параграфа");
+        }
+    }
 }

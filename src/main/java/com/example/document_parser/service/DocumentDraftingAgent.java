@@ -83,7 +83,7 @@ public class DocumentDraftingAgent {
         List<DocumentBlock> blocks = null;
         try {
             log.info("🔗 Попытка генерации через Multi-Agent Chain...");
-            blocks = multiAgentService.generateWithAgentChain(enrichedPrompt);
+            blocks = multiAgentService.generateWithAgentChain(enrichedPrompt, ragContext);
             log.info("✅ Multi-Agent Chain успешно вернул {} блоков", blocks.size());
         } catch (Exception e) {
             log.warn("⚠️ Multi-Agent Chain failed: {}. Trying fallback...", e.getMessage());

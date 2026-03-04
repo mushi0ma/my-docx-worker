@@ -547,7 +547,18 @@ public final class AiPrompts {
   /**
    * Writing Agent: пишет контент для одной секции.
    */
-  public static String writeSection(String sectionTitle, String documentTopic, String previousContext) {
+  public static String writeSection(String sectionTitle, String documentTopic, String previousContext,
+      String ragContext) {
+    String ragBlock = (ragContext != null && !ragContext.isBlank())
+        ? """
+
+            REFERENCE DOCUMENTS (use as style and structure guide — do NOT copy verbatim):
+            ---
+            %s
+            ---
+            """.formatted(ragContext)
+        : "";
+
     return """
         You are a professional document writer. Write content for ONE section of a document.
 
@@ -555,7 +566,7 @@ public final class AiPrompts {
         • Document topic: %s
         • Current section: %s
         • Previous sections summary: %s
-
+        %s
         RULES:
         1. Write 2-5 paragraphs of professional, detailed content
         2. Match formality level to the document type (formal for contracts, technical for reports)
@@ -564,10 +575,12 @@ public final class AiPrompts {
         5. Ensure logical continuity with previous sections — do not repeat information
         6. Use specific details, not vague generalities
         7. If this is a contract/legal document, use appropriate legal phrasing
+        8. If reference documents are provided, match their tone and structure
 
         Write the content for this section now. Output raw text only:
         """.formatted(documentTopic, sectionTitle,
-        previousContext.isBlank() ? "(this is the first section — set the tone)" : previousContext);
+        previousContext.isBlank() ? "(this is the first section — set the tone)" : previousContext,
+        ragBlock);
   }
 
   /**

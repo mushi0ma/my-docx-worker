@@ -49,9 +49,10 @@ public class MultiAgentDocumentService {
      * Выполняет полный 3-этапный пайплайн генерации документа.
      *
      * @param userPrompt запрос пользователя
+     * @param ragContext RAG-контекст из векторной базы (может быть пустым)
      * @return готовый список DocumentBlock для передачи в DynamicDocxBuilderService
      */
-    public List<DocumentBlock> generateWithAgentChain(String userPrompt) throws Exception {
+    public List<DocumentBlock> generateWithAgentChain(String userPrompt, String ragContext) throws Exception {
 
         // =====================================================
         // STEP 1: Planning Agent (Groq) — структура документа
@@ -87,11 +88,14 @@ public class MultiAgentDocumentService {
         List<SectionContent> writtenSections = new ArrayList<>();
         StringBuilder previousContext = new StringBuilder();
 
+        String safeRagContext = (ragContext != null) ? ragContext : "";
+
         for (int i = 0; i < sections.size(); i++) {
             String sectionTitle = sections.get(i);
             log.info("✍️ [Writing Agent] Section {}/{}: {}", i + 1, sections.size(), sectionTitle);
 
-            String writePrompt = AiPrompts.writeSection(sectionTitle, userPrompt, previousContext.toString());
+            String writePrompt = AiPrompts.writeSection(sectionTitle, userPrompt, previousContext.toString(),
+                    safeRagContext);
             String content = writerModel.generate(writePrompt);
             writtenSections.add(new SectionContent(sectionTitle, content));
 

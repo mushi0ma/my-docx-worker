@@ -260,86 +260,114 @@ public class DynamicDocxBuilderService {
                 || "number".equalsIgnoreCase(block.getListNumId())
                 || "numbered".equalsIgnoreCase(block.getListNumId());
 
-        // Parse list level (0-based), default to 0
+        // Parse list level (0-based), default to 0, max 2
         int level = 0;
         if (block.getListLevel() != null) {
             try {
-                level = Integer.parseInt(block.getListLevel());
+                level = Math.min(2, Math.max(0, Integer.parseInt(block.getListLevel())));
             } catch (NumberFormatException ignored) {
             }
-        }
-
-        // Collect list items: either from runs (one item per run) or split text by
-        // newlines
-        List<String> items;
-        if (block.getRuns() != null && !block.getRuns().isEmpty()) {
-            items = block.getRuns().stream()
-                    .filter(r -> r != null && r.getText() != null && !r.getText().isBlank())
-                    .map(RunData::getText)
-                    .toList();
-        } else {
-            items = List.of(block.getText().split("\\n"));
         }
 
         // Create numbering definition
         BigInteger abstractNumId = createAbstractNum(document, isOrdered);
         BigInteger numId = addNum(document, abstractNumId);
 
-        for (String itemText : items) {
-            if (itemText == null || itemText.isBlank())
-                continue;
+        // Collect list items: either from runs (one item per run) or split text by
+        // newlines
+        if (block.getRuns() != null && !block.getRuns().isEmpty()) {
+            for (RunData runData : block.getRuns()) {
+                if (runData == null || runData.getText() == null || runData.getText().isBlank())
+                    continue;
 
-            // Strip manually typed "1. " or "- " prefixes if AI added them
-            String cleanText = itemText.replaceFirst("^\\s*(?:\\d+[.)\\s]+|[-•*]\\s+)", "");
+                XWPFParagraph paragraph = document.createParagraph();
+                paragraph.setAlignment(safeParseAlignment(block.getAlignment()));
 
-            XWPFParagraph paragraph = document.createParagraph();
-            paragraph.setAlignment(safeParseAlignment(block.getAlignment()));
+                // Set numbering properties via low-level XML
+                CTNumPr numPr = paragraph.getCTP().addNewPPr().addNewNumPr();
+                numPr.addNewIlvl().setVal(BigInteger.valueOf(level));
+                numPr.addNewNumId().setVal(numId);
 
-            // Set numbering properties via low-level XML
-            CTNumPr numPr = paragraph.getCTP().addNewPPr().addNewNumPr();
-            numPr.addNewIlvl().setVal(BigInteger.valueOf(level));
-            numPr.addNewNumId().setVal(numId);
+                // Strip manually typed "1. " or "- " prefixes if AI added them
+                RunData cleanedRun = RunData.builder()
+                        .text(runData.getText().replaceFirst("^\\s*(?:\\d+[.)\\s]+|[-•*]\\s+)", ""))
+                        .isBold(runData.getIsBold())
+                        .isItalic(runData.getIsItalic())
+                        .isUnderline(runData.getIsUnderline())
+                        .isStrikeThrough(runData.getIsStrikeThrough())
+                        .fontSize(runData.getFontSize())
+                        .color(runData.getColor())
+                        .fontFamily(runData.getFontFamily())
+                        .isSubscript(runData.getIsSubscript())
+                        .isSuperscript(runData.getIsSuperscript())
+                        .textHighlightColor(runData.getTextHighlightColor())
+                        .build();
 
-            XWPFRun run = paragraph.createRun();
-            run.setText(cleanText);
-            run.setFontSize(safeParseFontSize(null));
+                applyRun(paragraph.createRun(), cleanedRun);
+            }
+        } else if (block.getText() != null) {
+            List<String> items = List.of(block.getText().split("\\n"));
+            for (String itemText : items) {
+                if (itemText == null || itemText.isBlank())
+                    continue;
+
+                String cleanText = itemText.replaceFirst("^\\s*(?:\\d+[.)\\s]+|[-•*]\\s+)", "");
+
+                XWPFParagraph paragraph = document.createParagraph();
+                paragraph.setAlignment(safeParseAlignment(block.getAlignment()));
+
+                CTNumPr numPr = paragraph.getCTP().addNewPPr().addNewNumPr();
+                numPr.addNewIlvl().setVal(BigInteger.valueOf(level));
+                numPr.addNewNumId().setVal(numId);
+
+                XWPFRun run = paragraph.createRun();
+                run.setText(cleanText);
+                run.setFontSize(safeParseFontSize(null));
+            }
         }
     }
 
     /**
-     * Creates an abstract numbering definition (bullet or decimal).
+     * Creates an abstract numbering definition with multi-level support (levels
+     * 0-2).
      */
     private BigInteger createAbstractNum(XWPFDocument document, boolean isOrdered) {
-        XWPFNumbering numbering = document.createNumbering();
+        // Reuse existing numbering if available, otherwise create new
+        XWPFNumbering numbering = document.getNumbering();
+        if (numbering == null) {
+            numbering = document.createNumbering();
+        }
 
         CTAbstractNum abstractNum = CTAbstractNum.Factory.newInstance();
-        // Use a unique ID based on existing count
         BigInteger abstractNumId = BigInteger.valueOf(
                 numbering.getAbstractNums() != null ? numbering.getAbstractNums().size() : 0);
         abstractNum.setAbstractNumId(abstractNumId);
 
-        // Define level 0
-        CTLvl lvl = abstractNum.addNewLvl();
-        lvl.setIlvl(BigInteger.ZERO);
+        // Define levels 0-2 for multi-level support
+        String[] bulletChars = { "•", "◦", "▪" };
+        int[] indents = { 720, 1440, 2160 };
 
-        if (isOrdered) {
-            lvl.addNewNumFmt().setVal(STNumberFormat.DECIMAL);
-            lvl.addNewLvlText().setVal("%1.");
-            lvl.addNewStart().setVal(BigInteger.ONE);
-        } else {
-            lvl.addNewNumFmt().setVal(STNumberFormat.BULLET);
-            lvl.addNewLvlText().setVal("•");
+        for (int lvl = 0; lvl <= 2; lvl++) {
+            CTLvl ctLvl = abstractNum.addNewLvl();
+            ctLvl.setIlvl(BigInteger.valueOf(lvl));
 
-            // Set bullet font
-            CTFonts fonts = lvl.addNewRPr().addNewRFonts();
-            fonts.setAscii("Symbol");
-            fonts.setHAnsi("Symbol");
+            if (isOrdered) {
+                ctLvl.addNewNumFmt().setVal(STNumberFormat.DECIMAL);
+                ctLvl.addNewLvlText().setVal("%" + (lvl + 1) + ".");
+                ctLvl.addNewStart().setVal(BigInteger.ONE);
+            } else {
+                ctLvl.addNewNumFmt().setVal(STNumberFormat.BULLET);
+                ctLvl.addNewLvlText().setVal(bulletChars[lvl]);
+
+                CTFonts fonts = ctLvl.addNewRPr().addNewRFonts();
+                fonts.setAscii("Symbol");
+                fonts.setHAnsi("Symbol");
+            }
+
+            CTInd ind = ctLvl.addNewPPr().addNewInd();
+            ind.setLeft(BigInteger.valueOf(indents[lvl]));
+            ind.setHanging(BigInteger.valueOf(360));
         }
-
-        // Set indentation
-        CTInd ind = lvl.addNewPPr().addNewInd();
-        ind.setLeft(BigInteger.valueOf(720));
-        ind.setHanging(BigInteger.valueOf(360));
 
         numbering.addAbstractNum(new XWPFAbstractNum(abstractNum));
         return abstractNumId;

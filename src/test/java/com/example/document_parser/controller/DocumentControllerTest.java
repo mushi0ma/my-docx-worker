@@ -22,6 +22,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.UUID;
 
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
@@ -193,5 +194,38 @@ class DocumentControllerTest {
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"question\":\"\"}"))
                 .andExpect(status().isBadRequest());
+    }
+
+    // ================================================================
+    // POST /generate-ai — AI crashes → JSON error (not broken .docx)
+    // ================================================================
+
+    @Test
+    void generateAi_aiThrows_returns500Json() throws Exception {
+        when(documentDraftingAgent.draftNewDocument(anyString(), anyString()))
+                .thenThrow(new RuntimeException("Model inference failed"));
+
+        mockMvc.perform(post("/api/v1/documents/generate-ai")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"prompt\":\"Создай отчёт\"}"))
+                .andExpect(status().isInternalServerError())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.error").value("AI document generation failed"))
+                .andExpect(jsonPath("$.status").value(500))
+                .andExpect(jsonPath("$.jobId").exists());
+    }
+
+    @Test
+    void generateAi_rateLimited_returns503() throws Exception {
+        when(documentDraftingAgent.draftNewDocument(anyString(), anyString()))
+                .thenThrow(new RuntimeException("429 Too Many Requests"));
+
+        mockMvc.perform(post("/api/v1/documents/generate-ai")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"prompt\":\"Создай договор\"}"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.error").value("AI model rate limited"))
+                .andExpect(jsonPath("$.status").value(503));
     }
 }
